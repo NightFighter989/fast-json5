@@ -48,12 +48,18 @@ const AFTER_VALUE = 4 // ',', a closer, or end of input at the top level
  *   comment, JSON5 whitespace) is left for the JS trailing-comma check.
  */
 const JSON_RUN =
-  /(?:"[^"\\\x00-\x1f]*(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})[^"\\\x00-\x1f]*)*"|[{}[\]:][ \t\n\r]*|[ \t\n\r]+|,[ \t\n\r]*(?=["'[{0-9A-Za-z_$\\+.-])|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?(?![.eExX0-9])|(?:true|false|null)(?=[ \t\n\r]*(?:[,\]}]|$)))*/y
+  /(?:"[^"\\\x00-\x1f]*(?:\\(?:["\\/bfnrt]|u[\da-fA-F]{4})[^"\\\x00-\x1f]*)*"|[{}[\]:][ \t\n\r]*|[ \t\n\r]+|,[ \t\n\r]*(?=["'[{\w$\\+.-])|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?![.eExX\d])|(?:true|false|null)(?=[ \t\n\r]*(?:[,\]}]|$)))*/y
 /** Every part is optional, so this always matches; the captures say which form it was. */
-const NUMBER = /([+-]?)(?:0[xX]([0-9a-fA-F]+)|(Infinity)|(NaN)|(0|[1-9][0-9]*)?(\.[0-9]*)?([eE][+-]?[0-9]+)?)/y
+const NUMBER = /([+-]?)(?:0[xX]([\da-fA-F]+)|(Infinity)|(NaN)|(0|[1-9]\d*)?(\.\d*)?([eE][+-]?\d+)?)/y
 /** String body up to the next quote, backslash or control character (either kind of string). */
 const STRING_RUN = /[^'"\\\x00-\x1f]*/y
-const LINE_COMMENT_BODY = new RegExp(`[^\n\r${String.fromCharCode(0x2028, 0x2029)}]*`, 'y')
+/**
+ * A run of JSON5 whitespace and comments. JS `\s` is exactly JSON5's whitespace set (checked over
+ * the whole BMP), and `.` stops at exactly JSON5's line terminators (LF, CR, LS, PS). An
+ * unterminated block comment isn't matched, so the run stops at its `/`.
+ */
+const SPACE_AND_COMMENTS = /(?:\s|\/\/.*|\/\*[\s\S]*?\*\/)*/y
+const JSON_SPACE = /[ \t\n\r]*/y
 // ES5 IdentifierStart / IdentifierPart categories, as the JSON5 spec defines them (\p{L} is Lu Ll Lt Lm Lo).
 const UNICODE_ID_START = /[\p{L}\p{Nl}]/u
 const UNICODE_ID_PART = /[\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}]/u
@@ -150,14 +156,18 @@ export function scanFast(text: string, reject: boolean): string | undefined {
         prev = COMMA
       }
       i++
-    } else if (c === SLASH) {
-      i = comment(i)
+    } else if (c === SLASH || c === VT || c === FF || isUnicodeSpace(c)) {
+      // Comments and JSON5-only whitespace: the whole run of them becomes one space.
+      const end = lookahead(i)
+      if (end === i) return undefined // an unterminated or stray comment
+      edit(i, end, ' ')
+      i = end
     } else if (c === DOUBLE_QUOTE || c === SINGLE_QUOTE) {
       pos = i
       string(c)
       i = pos
       prev = DOUBLE_QUOTE
-    } else if ((c >= ZERO && c <= NINE) || c === MINUS || c === PLUS || c === DOT) {
+    } else if (isDigit(c) || c === MINUS || c === PLUS || c === DOT) {
       if (i > 0 && isWordAt(i - 1)) return undefined
       pos = i
       number()
@@ -171,16 +181,17 @@ export function scanFast(text: string, reject: boolean): string | undefined {
       let d = text.charCodeAt(end)
       while (isAsciiIdentifierPart(d)) d = text.charCodeAt(++end)
       if (d === BACKSLASH || d > 127 || c === BACKSLASH || c > 127) end = identifierEnd(i)
-      const after = text.charCodeAt(end)
-      const isKey = after === COLON || (after === SPACE && text.charCodeAt(end + 1) === COLON) || text.charCodeAt(lookahead(end)) === COLON
-      if (isKey) {
+      // The colon usually follows directly; otherwise look past whitespace and comments.
+      const colon = text.charCodeAt(end) === COLON ? end : lookahead(end)
+      if (text.charCodeAt(colon) === COLON) {
         edit(i, end, `"${text.slice(i, end)}"`)
-        // Step over an adjacent colon and JSON whitespace here rather than with a regex call.
-        i = after === COLON ? end + 1 : after === SPACE && text.charCodeAt(end + 1) === COLON ? end + 2 : end
-        if (i > end) {
-          prev = COLON
+        if (colon === end) {
+          // Step over the colon and JSON whitespace here rather than with a regex call.
+          i = end + 1
           while (isJsonSpace(text.charCodeAt(i))) i++
+          prev = COLON
         } else {
+          i = end
           prev = DOUBLE_QUOTE
         }
       } else {
@@ -194,9 +205,6 @@ export function scanFast(text: string, reject: boolean): string | undefined {
         prev = ZERO
         i = end
       }
-    } else if (c === VT || c === FF || isUnicodeSpace(c)) {
-      edit(i, i + 1, ' ')
-      i++
     } else {
       return undefined
     }
@@ -261,7 +269,7 @@ export function scanStrict(text: string, reject: boolean): string {
       state = c === OPEN_BRACE ? KEY : ELEMENT
     } else {
       if (c === DOUBLE_QUOTE || c === SINGLE_QUOTE) string(c)
-      else if ((c >= ZERO && c <= NINE) || c === MINUS || c === PLUS || c === DOT || c === 73 /* I */ || c === 78 /* N */) number()
+      else if (isDigit(c) || c === MINUS || c === PLUS || c === DOT || c === 73 /* I */ || c === 78 /* N */) number()
       else if (c === 116 || c === 102 || c === 110) literal() // t f n
       else throw unexpected(at, state === ELEMENT ? "a value or ']'" : 'a value')
       state = AFTER_VALUE
@@ -269,32 +277,14 @@ export function scanStrict(text: string, reject: boolean): string {
   }
 }
 
-/** Index of the next significant character at or after `i`, skipping whitespace and comments. Edits nothing. */
+/**
+ * Index of the next significant character at or after `i`, skipping whitespace and comments.
+ * Edits nothing. Stops at the `/` of an unterminated or stray comment.
+ */
 function lookahead(i: number): number {
-  const text = src
-  for (;;) {
-    const c = text.charCodeAt(i)
-    if (isJsonSpace(c)) {
-      i++
-    } else if (c === SLASH) {
-      const next = text.charCodeAt(i + 1)
-      if (next === SLASH) {
-        LINE_COMMENT_BODY.lastIndex = i + 2
-        LINE_COMMENT_BODY.test(text)
-        i = LINE_COMMENT_BODY.lastIndex
-      } else if (next === ASTERISK) {
-        const close = text.indexOf('*/', i + 2)
-        if (close < 0) return text.length
-        i = close + 2
-      } else {
-        return i
-      }
-    } else if (c === VT || c === FF || isUnicodeSpace(c)) {
-      i++
-    } else {
-      return i
-    }
-  }
+  SPACE_AND_COMMENTS.lastIndex = i
+  SPACE_AND_COMMENTS.test(src)
+  return SPACE_AND_COMMENTS.lastIndex
 }
 
 /**
@@ -306,38 +296,26 @@ function isWordAt(i: number): boolean {
   return c > 127 ? isIdentifierChar(src.codePointAt(i) as number, false) : isAsciiIdentifierPart(c) || c === DOT || c === BACKSLASH
 }
 
-/** Strict path: skip whitespace and comments, removing the ones JSON doesn't allow. Returns the next char code, or -1 at the end. */
+/**
+ * Strict path: skip whitespace and comments; if the run holds anything JSON doesn't allow,
+ * replace the whole run with one space. Returns the next char code, or -1 at the end.
+ */
 function skipSpace(): number {
-  for (;;) {
-    const c = src.charCodeAt(pos)
-    if (isJsonSpace(c)) {
-      pos++
-    } else if (c === SLASH) {
-      pos = comment(pos)
-    } else if (c === VT || c === FF || isUnicodeSpace(c)) {
-      edit(pos, pos + 1, ' ')
-      pos++
-    } else {
-      return c === c ? c : -1 // NaN past the end
-    }
+  const start = pos
+  pos = lookahead(start)
+  if (pos > start) {
+    JSON_SPACE.lastIndex = start
+    JSON_SPACE.test(src)
+    if (JSON_SPACE.lastIndex < pos) edit(start, pos, ' ')
   }
-}
-
-function comment(start: number): number {
-  const next = src.charCodeAt(start + 1)
-  let end: number
-  if (next === SLASH) {
-    LINE_COMMENT_BODY.lastIndex = start + 2
-    LINE_COMMENT_BODY.test(src)
-    end = LINE_COMMENT_BODY.lastIndex
-  } else if (next === ASTERISK) {
-    end = src.indexOf('*/', start + 2) + 2
-    if (end < 2) throw fail(start, 'UNTERMINATED_COMMENT', 'Unterminated block comment')
-  } else {
-    throw unexpected(start + 1, "'/' or '*' after '/'")
+  const c = src.charCodeAt(pos)
+  // Valid comments were consumed above, so a `/` here is an unterminated or stray one.
+  if (c === SLASH) {
+    throw src.charCodeAt(pos + 1) === ASTERISK
+      ? fail(pos, 'UNTERMINATED_COMMENT', 'Unterminated block comment')
+      : unexpected(pos + 1, "'/' or '*' after '/'")
   }
-  edit(start, end, ' ')
-  return end
+  return c === c ? c : -1 // NaN past the end
 }
 
 /** Read the string whose opening quote is at `pos`; leaves `pos` after it. */
@@ -387,50 +365,34 @@ function string(quote: number): void {
 
 /** Handle the escape sequence whose backslash is at `i`. Returns the index after it. */
 function escape(i: number): number {
-  const c = src.charCodeAt(i + 1)
+  const e = src[i + 1]
   let end = i + 2
+  if (e === undefined) throw unterminated(i + 1)
+  if ('"\\/bfnrt'.includes(e)) return end // already valid JSON
+  if (e === 'u') {
+    expectHex(end, 4)
+    return i + 6
+  }
+  const c = e.charCodeAt(0)
   let text: string
-  switch (c) {
-    case DOUBLE_QUOTE:
-    case BACKSLASH:
-    case SLASH:
-    case 98: // b
-    case 102: // f
-    case 110: // n
-    case 114: // r
-    case 116: // t
-      return end
-    case 117: // u
-      expectHex(end, 4)
-      return i + 6
-    case SINGLE_QUOTE:
-      text = "'"
-      break
-    case 118: // v
-      text = unicodeEscape(VT)
-      break
-    case ZERO:
-      if (isDigit(src.charCodeAt(end))) throw badEscape(end, 'a digit cannot follow \\0')
-      text = unicodeEscape(0)
-      break
-    case 120: // x
-      expectHex(end, 2)
-      end = i + 4
-      text = unicodeEscape(parseInt(src.slice(i + 2, end), 16))
-      break
-    case CR:
-      if (src.charCodeAt(end) === LF) end++
-    // falls through: CR, CRLF, LF, LS and PS are line continuations, which vanish
-    case LF:
-    case 0x2028:
-    case 0x2029:
-      text = ''
-      break
-    default:
-      if (c !== c) throw unterminated(i + 1)
-      if (isDigit(c)) throw badEscape(i + 1, 'octal escapes are not allowed')
-      // Identity escape: `\a` means `a`.
-      text = c < SPACE ? unicodeEscape(c) : (src[i + 1] as string)
+  if (e === 'x') {
+    expectHex(end, 2)
+    end = i + 4
+    text = unicodeEscape(parseInt(src.slice(i + 2, end), 16))
+  } else if (e === '0') {
+    if (isDigit(src.charCodeAt(end))) throw badEscape(end, 'a digit cannot follow \\0')
+    text = unicodeEscape(0)
+  } else if (isDigit(c)) {
+    throw badEscape(i + 1, 'octal escapes are not allowed')
+  } else if (e === 'v') {
+    text = unicodeEscape(VT)
+  } else if (c === LF || c === CR || c === 0x2028 || c === 0x2029) {
+    // Line continuation (CR, CRLF, LF, LS or PS): the backslash and line break vanish.
+    if (c === CR && src.charCodeAt(end) === LF) end++
+    text = ''
+  } else {
+    // Identity escape, including \': `\a` means `a`.
+    text = c < SPACE ? unicodeEscape(c) : e
   }
   edit(i, end, text)
   return end
@@ -478,33 +440,35 @@ function number(): void {
   const start = pos
   NUMBER.lastIndex = start
   const [text, sign, hex, infinity, nan, integer, fraction, exponent] = NUMBER.exec(src) as RegExpExecArray
+  // Every capture is either undefined or a non-empty string (even '0'), so truthiness is exact.
   const end = start + text.length
-  const isNaN = nan !== undefined
+  const isNaN = !!nan
   let json: string
-  if (hex !== undefined) {
+  if (hex) {
     const value = Number(`0x${hex}`)
     json = value === Infinity ? INFINITY_JSON : String(value)
-  } else if (infinity !== undefined || isNaN) {
+  } else if (infinity || isNaN) {
     if (rejectNonFinite) throw fail(start, 'NON_FINITE_NOT_ALLOWED', `${text} is not allowed (nonFinite: 'reject')`)
     if (isNaN) sawNaN = true
     json = isNaN ? NAN_SENTINEL_JSON : INFINITY_JSON
   } else {
     const body = start + (sign as string).length
-    if (integer === undefined && fraction === undefined) {
+    if (!integer && !fraction) {
       // Nothing numeric matched: point at the first character of Infinity/NaN that doesn't fit.
       const c = src.charCodeAt(body)
       const word = c === 73 ? 'Infinity' : c === 78 ? 'NaN' : ''
       throw unexpected(body + mismatch(body, word), word ? `'${word}'` : 'a number')
     }
-    if (integer === undefined && fraction === '.') throw unexpected(body + 1, 'a digit')
-    if (exponent === undefined) {
+    if (!integer && fraction === '.') throw unexpected(body + 1, 'a digit')
+    if (!exponent) {
       // A trailing `e` (or `x` after a bare 0) is a malformed exponent or hex prefix; report where
       // the missing digit should be, as json5 does.
       const c = src.charCodeAt(end)
       if (c === 101 || c === 69) throw unexpected(end + (src[end + 1] === '+' || src[end + 1] === '-' ? 2 : 1), 'a digit in the exponent')
-      if ((c === 120 || c === 88) && integer === '0' && fraction === undefined) throw unexpected(end + 1, 'a hexadecimal digit')
+      if ((c === 120 || c === 88) && integer === '0' && !fraction) throw unexpected(end + 1, 'a hexadecimal digit')
     }
-    json = `${integer ?? '0'}${fraction !== undefined && fraction.length > 1 ? fraction : ''}${exponent ?? ''}`
+    // `5.` drops its bare dot; `.5` gains a leading 0.
+    json = `${integer || '0'}${fraction?.[1] ? fraction : ''}${exponent || ''}`
   }
   // The sign of NaN is meaningless, so -NaN and +NaN are plain NaN too.
   if (sign === '-' && !isNaN) json = `-${json}`

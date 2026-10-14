@@ -250,7 +250,8 @@ describe('numbers', () => {
   })
 
   it('does not confuse a NaN-like string with NaN', () => {
-    expectParse(String.raw`["\u0000fast-json5:NaN:", 'NaN', NaN]`, [`${ch(0)}fast-json5:NaN:`, 'NaN', NaN])
+    // Same shape as the sentinel (NUL, "NaN", a random number), but not the per-process one.
+    expectParse(String.raw`["\u0000NaN0.5", 'NaN', NaN]`, [`${ch(0)}NaN0.5`, 'NaN', NaN])
   })
 
   it('rejects invalid numbers', () => {

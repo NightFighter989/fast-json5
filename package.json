@@ -66,10 +66,13 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@types/node": "^26.6.5",
+    "confbox": "^0.3.1",
     "fast-check": "^4.10.2",
     "json5": "^2.2.3",
+    "jsonc-parser": "^3.3.1",
     "mitata": "^1.0.34",
     "publint": "^0.3.25",
+    "rolldown": "^1.2.14",
     "strip-json-comments": "^5.0.3",
     "tsdown": "^0.23.1",
     "typescript": "^7.0.2",

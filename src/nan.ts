@@ -3,11 +3,9 @@
  * back afterwards. The sentinel starts with NUL and ends with a per-process random suffix, so
  * input cannot produce it by accident and an attacker cannot guess it.
  */
-const SUFFIX = `${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
-
-const NAN_SENTINEL = `${String.fromCharCode(0)}fast-json5:NaN:${SUFFIX}`
-/** The sentinel as a JSON string literal (NUL must be escaped in JSON). */
-export const NAN_SENTINEL_JSON: string = `"\\u0000fast-json5:NaN:${SUFFIX}"`
+const NAN_SENTINEL = `${String.fromCharCode(0)}NaN${Math.random()}` // ~52 random bits
+/** The sentinel as a JSON string literal (JSON.stringify escapes the NUL). */
+export const NAN_SENTINEL_JSON: string = JSON.stringify(NAN_SENTINEL)
 
 type Reviver = (this: any, key: string, value: any) => any
 

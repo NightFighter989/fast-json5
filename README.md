@@ -1,11 +1,11 @@
 # fast-json5
 
-A fast, spec-complete [JSON5](https://json5.org) parser. It rewrites JSON5 into plain JSON, using a native regex for every stretch that's already JSON, and lets the engine's own `JSON.parse` build the values. That makes it **5–20× faster than [json5](https://www.npmjs.com/package/json5)**, and within about **1.25× of `JSON.parse`** on plain JSON.
+A fast, spec-complete [JSON5](https://json5.org) parser. It rewrites JSON5 into plain JSON, using a native regex for every stretch that's already JSON, and lets the engine's own `JSON.parse` build the values. That makes it **5–20× faster than [json5](https://www.npmjs.com/package/json5)**, 3–4× faster than the fastest JSONC parser, and within about **1.3× of `JSON.parse`** on plain JSON.
 
 - A drop-in replacement for `JSON5.parse(text, reviver)`
 - The whole JSON5 spec, checked against the official [json5-tests](https://github.com/json5/json5-tests) suite and fuzzed against json5
 - Precise `SyntaxError`s with line, column and an error code
-- No dependencies, about 3.5 KiB minified and gzipped, ESM and CommonJS, TypeScript types included
+- No dependencies, 3.3 KiB minified and gzipped (a third of json5), ESM and CommonJS, TypeScript types included
 - Node 18+, Bun, Deno and browsers
 
 ```sh
@@ -42,16 +42,33 @@ fast-json5 only parses; keep json5 (or use `JSON.stringify`) if you also need `J
 
 ## Benchmarks
 
-Node 22, measured with [mitata](https://github.com/evanwashere/mitata). Run `npm run build && npm run bench` to reproduce. Times are per parse; lower is better.
+Node 22, measured with [mitata](https://github.com/evanwashere/mitata). Run `npm run build && npm run bench` to reproduce. Times are per parse; lower is better. A dash means that parser can't read that input.
 
-| Input | fast-json5 | `JSON.parse` | json5 | strip-json-comments + `JSON.parse` |
-| --- | --- | --- | --- | --- |
-| Pure JSON, 318 KiB | **1.5 ms** | 1.2 ms | 30 ms | 11 ms |
-| Minified JSON, 154 KiB | **1.2 ms** | 1.0 ms | 21 ms | 4.4 ms |
-| JSONC (comments, trailing commas), 348 KiB | **1.9 ms** | — | 32 ms | 14 ms |
-| Full JSON5, 328 KiB | **4.0 ms** | — | 33 ms | — |
-| Small JSON config, 594 B | **3.3 µs** | 2.9 µs | 57 µs | 15 µs |
-| Small JSON5 config, 451 B | **7.9 µs** | — | 44 µs | — |
+| Input | fast-json5 | `JSON.parse` | [jsonc-parser](https://www.npmjs.com/package/jsonc-parser) | [strip-json-comments](https://www.npmjs.com/package/strip-json-comments) + `JSON.parse` | [confbox](https://www.npmjs.com/package/confbox) `parseJSONC` | [json5](https://www.npmjs.com/package/json5) | confbox `parseJSON5` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Pure JSON, 318 KiB | **1.5 ms** | 1.1 ms | 6.4 ms | 10.9 ms | 14.1 ms | 30 ms | 32 ms |
+| Minified JSON, 154 KiB | **1.3 ms** | 1.0 ms | 4.4 ms | 4.6 ms | 4.7 ms | 21 ms | 21 ms |
+| JSONC (comments, trailing commas), 348 KiB | **1.9 ms** | — | 6.8 ms | 13.6 ms | 15.3 ms | 32 ms | 35 ms |
+| Full JSON5, 328 KiB | **3.7 ms** | — | — | — | — | 32 ms | 35 ms |
+| Small JSON config, 594 B | **3.4 µs** | 2.8 µs | 10.1 µs | 14.6 µs | 19.3 µs | 61 µs | 64 µs |
+| Small JSON5 config, 451 B | **8.2 µs** | — | — | — | — | 44 µs | 48 µs |
+
+jsonc-parser is the fastest of the others, and fast-json5 is still 3–4× faster than it while also handling full JSON5. jsonc-parser is error-tolerant: it never throws, and returns a best-effort value plus a list of errors.
+
+## Bundle size
+
+Each parser is bundled the way an app would import it (tree-shaken to its parse function, minified with rolldown). Run `npm run size` to reproduce.
+
+| Parser | Parses | Minified | Minified + gzip |
+| --- | --- | --- | --- |
+| **fast-json5** | JSON5 | **7.4 KiB** | **3.3 KiB** |
+| json5 | JSON5 | 31.3 KiB | 9.6 KiB |
+| confbox `parseJSON5` | JSON5 (bundles json5) | 27.4 KiB | 8.1 KiB |
+| jsonc-parser | JSONC | 9.5 KiB | 3.1 KiB |
+| confbox `parseJSONC` | JSONC (bundles strip-json-comments) | 1.5 KiB | 0.9 KiB |
+| strip-json-comments | removes comments and trailing commas; `JSON.parse` does the parsing | 1.0 KiB | 0.6 KiB |
+
+fast-json5 is about a third the size of json5, and about the size of jsonc-parser, which handles only JSONC. The published files aren't minified, so stack traces stay readable; your bundler minifies them.
 
 ## How it works
 
@@ -142,7 +159,7 @@ Errors thrown by your reviver propagate unchanged. If your app can load both the
 | `npm run test:smoke` | Runtime checks against the built `dist/`, in both module formats |
 | `npm run bench` | The benchmark table above |
 | `npm run bench:ab -- <dir>` | Interleaved A/B timing of `dist/` against another build in `<dir>`, as median ratios |
-| `npm run size` | Raw, minified, gzip and brotli size of the bundle |
+| `npm run size` | The bundle-size table above (`-- --print` also prints fast-json5's minified code) |
 
 The dev toolchain needs Node 22.18 or later; the published package runs on Node 18 and later. See [RELEASING.md](./RELEASING.md) for how releases are published.
 

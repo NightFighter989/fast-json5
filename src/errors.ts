@@ -29,13 +29,9 @@ export class JSON5SyntaxError extends SyntaxError {
   readonly reason: string
 
   constructor(source: string, offset: number, code: JSON5ErrorCode, reason: string) {
-    let line = 1
-    let lineStart = 0
-    for (let i = source.indexOf('\n'); i >= 0 && i < offset; i = source.indexOf('\n', i + 1)) {
-      line++
-      lineStart = i + 1
-    }
-    const column = offset - lineStart + 1
+    const lines = source.slice(0, offset).split('\n')
+    const line = lines.length
+    const column = (lines[line - 1] as string).length + 1
     super(`${reason} at line ${line}, column ${column}`)
     this.lineNumber = line
     this.columnNumber = column

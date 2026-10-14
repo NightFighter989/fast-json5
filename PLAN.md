@@ -56,7 +56,14 @@ Output is built by string concatenation (`out = out + slice + text`). V8 makes r
 - The state is declared with **`var`, not `let`**. Module-level `let` needs a temporal-dead-zone check on every access from a function, and the interleaved A/B benchmark (`bench/ab.js`) measured `let` at about 8% slower on JSON5 input. The hottest functions also copy `src` into a local.
 - **Duplicates merged:** one number regex instead of two, one string-run regex for both quote styles, inline ASCII identifier loops instead of a regex, one `isWordAt` for both sides of a number, `\p{L}` instead of listing Lu, Ll, Lt, Lm and Lo, and JS `\s` for JSON5 whitespace. `\s` matches exactly the same set across the whole BMP, which was verified before relying on it.
 - **NaN path:** the restore walk and the reviver both iterate arrays and objects the same way, through `Object.keys`. JSON arrays have no holes, so that's exact. The walk stays iterative, because `JSON.parse`'s native reviver overflows the stack at about 10k levels.
-- **Result:** minified size 10.74 KiB → 8.14 KiB, min+gzip 4.09 KiB → 3.53 KiB (`npm run size`).
+- **Result of the first pass:** minified size 10.74 KiB → 8.14 KiB, min+gzip 4.09 KiB → 3.53 KiB.
+
+**Second size pass** (from a function-by-function read of the minified bundle): 8.14 → 7.38 KiB minified, 3.53 → 3.31 KiB min+gzip.
+- Whitespace and comments: one regex, `/(?:\s|\/\/.*|\/\*[\s\S]*?\*\/)*/y`, replaced three hand-written loops and a line-comment regex. `.` stops at exactly JSON5's line terminators. Both scanners replace a whole run of whitespace and comments with one space, and a `/` left at a token position can only be an unterminated or stray comment, so it becomes the error.
+- `number()` tests captures for truthiness (each is undefined or a non-empty string), `escape()` uses one string lookup for the JSON-valid escapes, regexes use `\d` and `\w`, the NaN sentinel is one random number with its JSON form from `JSON.stringify`, and error line/column come from `slice` plus `split`.
+- Speed is neutral against the previous commit in interleaved A/B runs (within ±4% noise).
+
+**How it compares** (`npm run size`, each library tree-shaken to the parse function an app imports, minified, min+gzip): fast-json5 3.3 KiB, json5 9.6 KiB, confbox `parseJSON5` 8.1 KiB, jsonc-parser 3.1 KiB (JSONC only), strip-json-comments 0.6 KiB (a comment stripper, not a parser).
 
 **Performance found in the same pass.** The fast path's comma rule used to consume a comma only before a plain-JSON value start, so every comma before an unquoted key (`, price:`) went to the JS trailing-comma check. A comma followed by any ASCII token start (a quote, bracket, digit, sign, dot, letter or `\`) can't be trailing, so `JSON_RUN` now consumes those too. The JSON5 corpus got 22% faster (5.1 ms → 4.0 ms); JSON is unchanged.
 
