@@ -1,5 +1,7 @@
 # fast-json5
 
+[![npm](https://img.shields.io/npm/v/fast-json5)](https://www.npmjs.com/package/fast-json5) [![CI](https://github.com/NightFighter989/fast-json5/actions/workflows/ci.yml/badge.svg)](https://github.com/NightFighter989/fast-json5/actions/workflows/ci.yml) [![minzipped size](https://img.shields.io/bundlephobia/minzip/fast-json5)](https://bundlephobia.com/package/fast-json5)
+
 A fast, spec-complete [JSON5](https://json5.org) parser. It rewrites JSON5 into plain JSON, using a native regex for every stretch that's already JSON, and lets the engine's own `JSON.parse` build the values. That makes it **5–20× faster than [json5](https://www.npmjs.com/package/json5)**, 3–4× faster than the fastest JSONC parser, and within about **1.3× of `JSON.parse`** on plain JSON.
 
 - A drop-in replacement for `JSON5.parse(text, reviver)`

@@ -22,8 +22,10 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
+      # release:check inspects the tarball, so dist/ must exist first.
+      - run: npm run build
       - run: npm run release:check
-      # prepublishOnly also runs typecheck, tests, build and package lint.
+      # prepublishOnly then runs typecheck, tests, the long fuzz pass, build, smoke tests and package lint.
       - run: npm publish --provenance --access public
         env:
           # Only needed until trusted publishing is configured on npmjs.com; then leave it unset.

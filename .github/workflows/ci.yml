@@ -1,9 +1,13 @@
 name: CI
 
+# One job, kept small: test on the oldest Node the dev toolchain supports, then smoke-test the
+# built package on the older runtimes it promises to support. Docs-only changes skip CI.
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'LICENSE']
   pull_request:
+    paths-ignore: ['**.md', 'LICENSE']
 
 permissions:
   contents: read
@@ -13,62 +17,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test (Node ${{ matrix.node }}, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # The dev toolchain (vitest, tsdown) needs Node 22.18+; older runtimes are covered by `smoke`.
-        os: [ubuntu-latest]
-        node: [22, 24, 26]
-        include:
-          - os: windows-latest
-            node: 24
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          # vitest and tsdown need Node 22.18+.
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
       - run: npm run lint:pkg
-      - name: Upload build for smoke tests
-        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
 
-  smoke:
-    name: Smoke (${{ matrix.runtime }})
-    needs: test
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Runtimes the package supports but the dev toolchain can't run on, plus Bun and Deno.
-        runtime: [node-18, node-20, node-22, bun, deno]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      # The published package supports Node 18+, Bun and Deno, which the toolchain can't run on,
+      # so check the built dist/ there with the dependency-free smoke test (ESM and CJS).
+      - uses: actions/setup-node@v4
         with:
-          name: dist
-          path: dist/
-      - if: startsWith(matrix.runtime, 'node-')
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.runtime == 'node-18' && 18 || matrix.runtime == 'node-20' && 20 || 22 }}
-      - if: startsWith(matrix.runtime, 'node-')
+          node-version: 18
+      - name: Smoke test (Node 18)
         run: node test/smoke/smoke.mjs && node test/smoke/smoke.cjs
-      - if: matrix.runtime == 'bun'
-        uses: oven-sh/setup-bun@v2
-      - if: matrix.runtime == 'bun'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Smoke test (Node 20)
+        run: node test/smoke/smoke.mjs && node test/smoke/smoke.cjs
+      - uses: oven-sh/setup-bun@v2
+      - name: Smoke test (Bun)
         run: bun test/smoke/smoke.mjs && bun test/smoke/smoke.cjs
-      - if: matrix.runtime == 'deno'
-        uses: denoland/setup-deno@v2
-      - if: matrix.runtime == 'deno'
+      - uses: denoland/setup-deno@v2
+      - name: Smoke test (Deno)
         run: deno run --allow-read test/smoke/smoke.mjs

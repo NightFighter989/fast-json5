@@ -13,13 +13,13 @@
     "performance",
     "comments"
   ],
-  "homepage": "https://github.com/OWNER/fast-json5#readme",
+  "homepage": "https://github.com/NightFighter989/fast-json5#readme",
   "bugs": {
-    "url": "https://github.com/OWNER/fast-json5/issues"
+    "url": "https://github.com/NightFighter989/fast-json5/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/fast-json5.git"
+    "url": "git+https://github.com/NightFighter989/fast-json5.git"
   },
   "license": "MIT",
   "author": "Thomas Sedman",
@@ -56,8 +56,8 @@
     "bench": "node bench/index.js",
     "bench:ab": "node bench/ab.js",
     "size": "node scripts/size.mjs",
-    "lint:pkg": "publint && attw --pack .",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run test:smoke && npm run lint:pkg",
+    "lint:pkg": "publint && node scripts/attw.mjs",
+    "prepublishOnly": "npm run typecheck && npm test && npm run test:fuzz && npm run build && npm run test:smoke && npm run lint:pkg",
     "test:fuzz": "vitest run test/fuzz.test.ts --mode fuzz",
     "test:update-known": "vitest run test/conformance.test.ts --mode update-known",
     "test:smoke": "node test/smoke/smoke.mjs && node test/smoke/smoke.cjs",

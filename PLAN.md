@@ -191,10 +191,10 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 ## Packaging and release
 
 - Built by tsdown into `dist/index.js` (ESM), `dist/index.cjs` (CJS) and `.d.ts`/`.d.cts` files. `sideEffects: false`, no runtime dependencies. The tarball is 7 files, about 13 KiB packed. The published files are not minified, so stack traces stay readable; bundlers minify them to about 8 KiB (3.5 KiB gzipped).
-- **CI** (`.github/workflows/ci.yml`): typecheck, tests, build and `publint` + `attw` on Node 22, 24 and 26 (Ubuntu) and Node 24 (Windows). The dev toolchain needs Node 22.18+, so the built package is then **smoke-tested** (`test/smoke/`, no dependencies, ESM and CJS) on Node 18, 20, 22, Bun and Deno. That is what backs `engines: >=18`.
-- **Fuzz** (`fuzz.yml`): the 200k-case run weekly with fresh seeds, and on demand.
+- **CI** (`.github/workflows/ci.yml`), kept to one job on purpose: typecheck, tests, build and `publint` + `attw` on Node 22 (the oldest the dev toolchain supports), then the dependency-free smoke test (`test/smoke/`, ESM and CJS) of the built package on Node 18, Node 20, Bun and Deno. That is what backs `engines: >=18`. Docs-only changes skip CI.
+- **Fuzz:** the long run (200k cases per property) is part of `prepublishOnly`, so it runs before every publish, local or CI. There is no scheduled fuzz job. `npm test` runs a short pass on every CI run.
 - **Release** (`release.yml`): on a `v*` tag, `release:check` then `npm publish --provenance`. The check needs a real `repository` URL, a non-placeholder version, a CHANGELOG entry, a tag that matches the version, and exact tarball contents. The job runs in a GitHub environment `npm`, so publishing can require approval. The first publish uses an `NPM_TOKEN` secret, then it switches to trusted publishing (OIDC); see RELEASING.md.
-- `prepublishOnly` runs typecheck, tests, build, smoke tests and package lint, so nothing broken can be published even by hand.
+- `prepublishOnly` runs typecheck, tests, the long fuzz pass, build, smoke tests and package lint, so nothing broken can be published even by hand.
 - Keep the version in `0.x` until the API settles.
 - **Checked before release** with a packed tarball installed into a throwaway project: ESM and CJS imports both work and export exactly `parse` and `JSON5SyntaxError`; TypeScript typechecks a consumer under `nodenext` (as `.mts` and `.cts`) and `bundler`; `attw` covers `node10`.
 
@@ -210,7 +210,7 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 | **3. NaN** ✅ | sentinel, post-walk, JS reviver on the NaN path, `nonFinite: 'reject'` (Infinity was done in phase 2) | All of json5-tests passes; fuzz NaN filter removed |
 | **4. Errors** ✅ | `JSON5SyntaxError` with codes, contextual messages, json5 position rules | Error tests pass; positions match json5 (§7); messages are the same on every engine |
 | **5. Performance** ✅ | fast path with `JSON_RUN` and local rules, strict fallback, rope output, regex alternative ordering | Targets in "Benchmarks" are met (see the table) |
-| **6. Release 0.1.0** 🟡 | CI, README with table, provenance publish | Prepared: workflows, metadata, CHANGELOG, RELEASING.md and tarball checks are done. Waiting on the GitHub repository URL, the first CI run and the actual publish |
+| **6. Release 0.1.0** 🟡 | CI, README with table, provenance publish | Ready: repository set (github.com/NightFighter989/fast-json5), CI trimmed, `release:check` passes. Waiting on the first CI run and the npm publish (see RELEASING.md) |
 
 ## Dev notes
 
@@ -218,7 +218,7 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 
 ## Open questions
 
-- **Before publishing:** the GitHub repository URL (it replaces the `OWNER` placeholders in package.json).
+- ~~Repository URL~~ Done: https://github.com/NightFighter989/fast-json5.
 - ~~Minimum Node version~~ Decided: Node 18. The library only needs ES2020 plus Unicode regexes, and CI smoke-tests 18 and 20 even though both are end-of-life, which widens reach for config loaders on old runtimes. Raising it later would be a breaking change, so keep it while it costs nothing.
 - ~~Export `toJSON(text)`~~ Held back for 0.1. It would freeze the rewrite format (the NaN sentinel, rope output) as public API. Can be added later without breaking anything.
 - ~~JSON.parse-first vs scan-first~~ Decided: the transform always runs (see §1).
