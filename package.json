@@ -1,6 +1,6 @@
 {
   "name": "fast-json5",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fast JSON5 parser: rewrites JSON5 to JSON with a native regex fast path, then lets JSON.parse build the values",
   "keywords": [
     "json5",

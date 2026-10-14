@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows
 [Semantic Versioning](https://semver.org/) (0.x: minor versions may change the API).
 
+## 0.1.1
+
+No changes to the library. This release moves publishing to npm trusted publishing (OIDC), so
+no npm token is stored anywhere; the package is still published with provenance from the
+tagged GitHub Actions workflow.
+
 ## 0.1.0
 
 First release.
