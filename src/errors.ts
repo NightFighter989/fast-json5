@@ -29,7 +29,13 @@ export class JSON5SyntaxError extends SyntaxError {
   readonly reason: string
 
   constructor(source: string, offset: number, code: JSON5ErrorCode, reason: string) {
-    const { line, column } = positionOf(source, offset)
+    let line = 1
+    let lineStart = 0
+    for (let i = source.indexOf('\n'); i >= 0 && i < offset; i = source.indexOf('\n', i + 1)) {
+      line++
+      lineStart = i + 1
+    }
+    const column = offset - lineStart + 1
     super(`${reason} at line ${line}, column ${column}`)
     this.lineNumber = line
     this.columnNumber = column
@@ -39,35 +45,11 @@ export class JSON5SyntaxError extends SyntaxError {
   }
 }
 
-function positionOf(src: string, offset: number): { line: number; column: number } {
-  let line = 1
-  let lineStart = 0
-  for (let i = src.indexOf('\n'); i !== -1 && i < offset; i = src.indexOf('\n', i + 1)) {
-    line++
-    lineStart = i + 1
-  }
-  return { line, column: offset - lineStart + 1 }
-}
+/** Letters, marks, numbers, punctuation and symbols print as themselves; anything else doesn't. */
+const VISIBLE = /[\p{L}\p{M}\p{N}\p{P}\p{S}]/u
 
-export function syntaxError(src: string, offset: number, code: JSON5ErrorCode, reason: string): JSON5SyntaxError {
-  return new JSON5SyntaxError(src, offset, code, reason)
-}
-
-/**
- * `Unexpected character "x"` (or `Unexpected end of input`) for the code point at `offset`,
- * optionally followed by what was expected there.
- */
-export function unexpected(src: string, offset: number, expected?: string): JSON5SyntaxError {
-  const suffix = expected ? `; expected ${expected}` : ''
-  if (offset >= src.length) return syntaxError(src, offset, 'UNEXPECTED_END', `Unexpected end of input${suffix}`)
-  return syntaxError(src, offset, 'UNEXPECTED_CHARACTER', `Unexpected character ${describe(src.codePointAt(offset) as number)}${suffix}`)
-}
-
-/** `"x"` for visible characters; `U+XXXX` for controls, spaces and other invisible ones. */
-function describe(cp: number): string {
-  const invisible =
-    cp < 0x21 || (cp >= 0x7f && cp <= 0xa0) || cp === 0xad || cp === 0x1680 || (cp >= 0x2000 && cp <= 0x200f) ||
-    (cp >= 0x2028 && cp <= 0x202f) || (cp >= 0x205f && cp <= 0x206f) || cp === 0x3000 || cp === 0xfeff ||
-    (cp >= 0xd800 && cp <= 0xdfff)
-  return invisible ? `U+${cp.toString(16).toUpperCase().padStart(4, '0')}` : JSON.stringify(String.fromCodePoint(cp))
+/** `"x"` for visible characters; `U+XXXX` for spaces, controls, format characters and lone surrogates. */
+export function describe(cp: number): string {
+  const char = String.fromCodePoint(cp)
+  return VISIBLE.test(char) ? JSON.stringify(char) : `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`
 }

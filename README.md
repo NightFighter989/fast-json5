@@ -5,7 +5,7 @@ A fast, spec-complete [JSON5](https://json5.org) parser. It rewrites JSON5 into 
 - A drop-in replacement for `JSON5.parse(text, reviver)`
 - The whole JSON5 spec, checked against the official [json5-tests](https://github.com/json5/json5-tests) suite and fuzzed against json5
 - Precise `SyntaxError`s with line, column and an error code
-- No dependencies, ESM and CommonJS, TypeScript types included
+- No dependencies, about 3.5 KiB minified and gzipped, ESM and CommonJS, TypeScript types included
 - Node 18+, Bun, Deno and browsers
 
 ```sh
@@ -49,9 +49,9 @@ Node 22, measured with [mitata](https://github.com/evanwashere/mitata). Run `npm
 | Pure JSON, 318 KiB | **1.5 ms** | 1.2 ms | 30 ms | 11 ms |
 | Minified JSON, 154 KiB | **1.2 ms** | 1.0 ms | 21 ms | 4.4 ms |
 | JSONC (comments, trailing commas), 348 KiB | **1.9 ms** | — | 32 ms | 14 ms |
-| Full JSON5, 328 KiB | **4.5 ms** | — | 31 ms | — |
+| Full JSON5, 328 KiB | **4.0 ms** | — | 33 ms | — |
 | Small JSON config, 594 B | **3.3 µs** | 2.9 µs | 57 µs | 15 µs |
-| Small JSON5 config, 451 B | **8.8 µs** | — | 45 µs | — |
+| Small JSON5 config, 451 B | **7.9 µs** | — | 44 µs | — |
 
 ## How it works
 
@@ -141,6 +141,8 @@ Errors thrown by your reviver propagate unchanged. If your app can load both the
 | `npm run build` | ESM and CJS builds with declarations into `dist/` |
 | `npm run test:smoke` | Runtime checks against the built `dist/`, in both module formats |
 | `npm run bench` | The benchmark table above |
+| `npm run bench:ab -- <dir>` | Interleaved A/B timing of `dist/` against another build in `<dir>`, as median ratios |
+| `npm run size` | Raw, minified, gzip and brotli size of the bundle |
 
 The dev toolchain needs Node 22.18 or later; the published package runs on Node 18 and later. See [RELEASING.md](./RELEASING.md) for how releases are published.
 

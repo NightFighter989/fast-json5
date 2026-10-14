@@ -1,5 +1,5 @@
 import { internalize, restoreNaN } from './nan.js'
-import { Scanner } from './transform.js'
+import { sawNaN, scanFast, scanStrict } from './transform.js'
 
 export { JSON5SyntaxError, type JSON5ErrorCode } from './errors.js'
 
@@ -25,33 +25,31 @@ export interface ParseOptions {
  *   `code` describing where and why. Errors thrown by a reviver propagate unchanged.
  */
 export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseOptions): T {
-  const options: ParseOptions =
-    typeof reviverOrOptions === 'function' ? { reviver: reviverOrOptions } : (reviverOrOptions ?? {})
+  const options: ParseOptions = typeof reviverOrOptions === 'function' ? { reviver: reviverOrOptions } : (reviverOrOptions ?? {})
   const src = String(text)
   const reject = options.nonFinite === 'reject'
+  const reviver = options.reviver
 
   // Fast path: rewrite JSON5 tokens, skip plain JSON with native regex runs, and let JSON.parse
-  // validate the structure.
-  const fast = new Scanner(src, reject)
+  // validate the structure. A token reader may throw on input it can't handle; that is not the
+  // final error, which comes from the strict scanner below.
   let json: string | undefined
   try {
-    json = fast.runLax()
-  } catch {
-    json = undefined
-  }
+    json = scanFast(src, reject)
+  } catch {}
   if (json !== undefined) {
     try {
-      return build(json, fast.nan, options.reviver)
+      return build(json, sawNaN, reviver)
     } catch (error) {
       // A reviver's own exception must propagate as-is (and the reviver must not run twice).
-      if (options.reviver && isValidJSON(json)) throw error
+      if (reviver && isValidJSON(json)) throw error
     }
   }
 
   // Slow path, only for invalid input or rare valid forms the fast path declines: the strict
   // scanner validates the full grammar, throwing a SyntaxError positioned in the original text.
-  const strict = new Scanner(src, reject)
-  return build(strict.run(), strict.nan, options.reviver)
+  json = scanStrict(src, reject)
+  return build(json, sawNaN, reviver)
 }
 
 function build<T>(json: string, nan: boolean, reviver: Reviver | undefined): T {

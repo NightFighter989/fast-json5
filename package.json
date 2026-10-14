@@ -54,6 +54,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
     "bench": "node bench/index.js",
+    "bench:ab": "node bench/ab.js",
+    "size": "node scripts/size.mjs",
     "lint:pkg": "publint && attw --pack .",
     "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run test:smoke && npm run lint:pkg",
     "test:fuzz": "vitest run test/fuzz.test.ts --mode fuzz",

@@ -46,11 +46,19 @@ export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseO
 **Decision (2026-10-14):** the transform always runs. There is no "try `JSON.parse` on the raw input first" path; speed comes from the scanner itself.
 
 `parse()` (in `src/index.ts`) works like this:
-1. **Fast path, `Scanner.runLax()`.** One sticky regex (`JSON_RUN`) consumes each maximal run of plain-JSON tokens in a single native call. A whole pure-JSON document is one call, at about 0.35 ms for 318 KiB. JS code only wakes up where JSON5 syntax may start, and rewrites that token under a local rule (§3). Structure isn't tracked; `JSON.parse` validates it.
+1. **Fast path, `scanFast()`.** One sticky regex (`JSON_RUN`) consumes each maximal run of plain-JSON tokens in a single native call. A whole pure-JSON document is one call, at about 0.35 ms for 318 KiB. JS code only wakes up where JSON5 syntax may start, and rewrites that token under a local rule (§3). Structure isn't tracked; `JSON.parse` validates it.
 2. `JSON.parse` on the output. If nothing was rewritten, the output is the input string itself, with no copy.
-3. **Slow path, only if step 1 bailed or step 2 threw:** `Scanner.run()`, the strict token-level state machine from phase 2. For invalid input it throws a `SyntaxError` positioned in the original text. For the rare valid form the fast path declines (e.g. `{true /* c */ : 1}`), it produces correct JSON. A reviver's own exception is told apart from a syntax error (the JSON is re-checked without the reviver), so it propagates unchanged and the reviver never runs twice.
+3. **Slow path, only if step 1 bailed or step 2 threw:** `scanStrict()`, the strict token-level state machine from phase 2. For invalid input it throws a `SyntaxError` positioned in the original text. For the rare valid form the fast path declines (e.g. `{true /* c */ : 1}`), it produces correct JSON. A reviver's own exception is told apart from a syntax error (the JSON is re-checked without the reviver), so it propagates unchanged and the reviver never runs twice.
 
 Output is built by string concatenation (`out = out + slice + text`). V8 makes rope strings, and `JSON.parse` flattens them in one native pass. Measured on 20k edits: rope 1.0 ms, parts-and-`join` 1.9 ms, `Uint16Array` plus `TextDecoder` 2.2 ms. Native `String.prototype.replace` with a callback took 4.9 ms just for the replacement, so it lost too.
+
+**Code shape, for size (size pass).** The scanner is module-level functions plus module-level state (`src`, `pos`, `last`, `out` and so on), not a class. Minifiers can rename variables but never properties, and the class version spent about 2.5 KiB of its minified size on names like `this.edit(` and `this.lookahead(`. This is safe because a scan never calls user code, so it can't be re-entered; `parse()` reads `sawNaN` right after the scan.
+- The state is declared with **`var`, not `let`**. Module-level `let` needs a temporal-dead-zone check on every access from a function, and the interleaved A/B benchmark (`bench/ab.js`) measured `let` at about 8% slower on JSON5 input. The hottest functions also copy `src` into a local.
+- **Duplicates merged:** one number regex instead of two, one string-run regex for both quote styles, inline ASCII identifier loops instead of a regex, one `isWordAt` for both sides of a number, `\p{L}` instead of listing Lu, Ll, Lt, Lm and Lo, and JS `\s` for JSON5 whitespace. `\s` matches exactly the same set across the whole BMP, which was verified before relying on it.
+- **NaN path:** the restore walk and the reviver both iterate arrays and objects the same way, through `Object.keys`. JSON arrays have no holes, so that's exact. The walk stays iterative, because `JSON.parse`'s native reviver overflows the stack at about 10k levels.
+- **Result:** minified size 10.74 KiB → 8.14 KiB, min+gzip 4.09 KiB → 3.53 KiB (`npm run size`).
+
+**Performance found in the same pass.** The fast path's comma rule used to consume a comma only before a plain-JSON value start, so every comma before an unquoted key (`, price:`) went to the JS trailing-comma check. A comma followed by any ASCII token start (a quote, bracket, digit, sign, dot, letter or `\`) can't be trailing, so `JSON_RUN` now consumes those too. The JSON5 corpus got 22% faster (5.1 ms → 4.0 ms); JSON is unchanged.
 
 ### 2. Rewrites
 
@@ -76,14 +84,14 @@ Inputs that are invalid in both JSON5 and JSON, and must stay invalid: leading z
 
 Neither path may turn invalid JSON5 into valid JSON, or change a value.
 
-**Fast path (`runLax`).** Each rewrite replaces one JSON5 token with a JSON token that has the same meaning and grammatical role. `JSON.parse` then rejects any structure that was wrong in the source. The rules below are where that argument needs care. Each one was found or confirmed by the corrupted-document fuzzer.
+**Fast path (`scanFast`).** Each rewrite replaces one JSON5 token with a JSON token that has the same meaning and grammatical role. `JSON.parse` then rejects any structure that was wrong in the source. The rules below are where that argument needs care. Each one was found or confirmed by the corrupted-document fuzzer.
 - **Plain-JSON runs:** `JSON_RUN` refuses tokens that are really the start of JSON5 syntax. A number isn't consumed if `.`, `e`, `x` or a digit continues it, so `5.` and `1.e5` are read whole. A literal is consumed only before `,` `]` `}` or end of input (`trueish`, `null:` and `true /* c */ :` go to JS). A comma is consumed only before a plain-JSON value start.
 - **Comments and exotic whitespace** become a space, never the empty string. Otherwise `1/**/2` could become `12`.
 - **Trailing commas** are dropped only when the previous significant character ends a value (not `,` `[` `{` `:`) and the next one is a closer. This keeps `[,]`, `[1,,]` and `{"a":,}` invalid. The previous character is worked out only when a comma or comment needs it.
 - **Bare words** are quoted only when a `:` follows, so they can only ever end up as keys. Non-keys must be `true`, `false`, `null`, `Infinity` or `NaN`; anything else bails.
 - **Numbers** rewritten in JS must not touch an identifier character, digit or `.` on either side (`1Infinity` would become `11e400`), and must not be followed by `:`. The colon check exists because `-NaN` becomes the sentinel *string*, which `JSON.parse` would accept as a key; the fuzzer found this.
 
-**Slow path (`run`).** This is the phase 2 state machine: five states (value, element-or-`]`, key-or-`}`, `:`, after-value), a boolean container stack (iterative, so depth is unlimited), and full validation with errors positioned in the original source. Trailing commas are decided by looking ahead at the comma, so edits stay in source order.
+**Slow path (`scanStrict`).** This is the phase 2 state machine: five states (value, element-or-`]`, key-or-`}`, `:`, after-value), a boolean container stack (iterative, so depth is unlimited), and full validation with errors positioned in the original source. Trailing commas are decided by looking ahead at the comma, so edits stay in source order.
 
 **Shared token readers** handle strings (sticky-regex runs over `[^"\\\x00-\x1f]*`), numbers (the JSON-number regex, falling back to the JSON5-number regex only when needed), and identifiers (an inline ASCII loop, with `\p{...}` checks per code point for anything else). They validate tokens the same way on both paths.
 
@@ -166,16 +174,16 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
   | Pure JSON, 318 KiB | 1.50 ms | 1.24× slower | 20× faster | 7.4× faster |
   | Minified JSON, 154 KiB | 1.23 ms | 1.22× slower | 17× faster | 3.6× faster |
   | JSONC, 348 KiB | 1.89 ms | — | 17× faster | 7.2× faster |
-  | Full JSON5, 328 KiB | 4.53 ms | — | 6.9× faster | — |
+  | Full JSON5, 328 KiB | 4.53 ms (3.99 ms after the size pass) | — | 6.9× faster (8.2×) | — |
   | Small JSON config | 3.3 µs | 1.16× slower | 17× faster | 4.4× faster |
-  | Small JSON5 config | 8.8 µs | — | 5.2× faster | — |
+  | Small JSON5 config | 8.8 µs (7.9 µs after the size pass) | — | 5.2× faster (5.6×) | — |
 
   Where the JSON5 time goes: on the 328 KiB case, the scan takes 2.8 ms, flattening the output rope 0.5 ms and `JSON.parse` 1.1 ms. The scan cost is mostly building the output (about 20k edits at roughly 50 ns each). Pure JSON is one regex call at about 0.35 ms plus `JSON.parse`.
 - **Targets to beat before v0.1.0:** at least 5× `json5` on realistic JSON5, and within about 1.3× of `JSON.parse` on pure JSON.
 
 ## Packaging and release
 
-- Built by tsdown into `dist/index.js` (ESM), `dist/index.cjs` (CJS) and `.d.ts`/`.d.cts` files. `sideEffects: false`, no runtime dependencies. The tarball is 7 files, about 13 KiB packed.
+- Built by tsdown into `dist/index.js` (ESM), `dist/index.cjs` (CJS) and `.d.ts`/`.d.cts` files. `sideEffects: false`, no runtime dependencies. The tarball is 7 files, about 13 KiB packed. The published files are not minified, so stack traces stay readable; bundlers minify them to about 8 KiB (3.5 KiB gzipped).
 - **CI** (`.github/workflows/ci.yml`): typecheck, tests, build and `publint` + `attw` on Node 22, 24 and 26 (Ubuntu) and Node 24 (Windows). The dev toolchain needs Node 22.18+, so the built package is then **smoke-tested** (`test/smoke/`, no dependencies, ESM and CJS) on Node 18, 20, 22, Bun and Deno. That is what backs `engines: >=18`.
 - **Fuzz** (`fuzz.yml`): the 200k-case run weekly with fresh seeds, and on demand.
 - **Release** (`release.yml`): on a `v*` tag, `release:check` then `npm publish --provenance`. The check needs a real `repository` URL, a non-placeholder version, a CHANGELOG entry, a tag that matches the version, and exact tarball contents. The job runs in a GitHub environment `npm`, so publishing can require approval. The first publish uses an `NPM_TOKEN` secret, then it switches to trusted publishing (OIDC); see RELEASING.md.

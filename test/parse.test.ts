@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { JSON5SyntaxError, parse } from '../src/index.js'
-import { transform } from '../src/transform.js'
+import { scanFast, scanStrict } from '../src/transform.js'
 import { expectSameAsJson5 } from './support/differential.js'
 import { markedPosition, syntaxErrorOf } from './support/errors.js'
 
@@ -72,7 +72,8 @@ describe('nonFinite option', () => {
 describe('fast path', () => {
   it('returns plain JSON unchanged, without copying', () => {
     const json = '{\n  "a": [1, -2.5e+3, "x\\n\\u00e9", true, null],\n  "b": {}\n}'
-    expect(transform(json)).toBe(json)
+    expect(scanFast(json, false)).toBe(json)
+    expect(scanStrict(json, false)).toBe(json)
   })
 })
 

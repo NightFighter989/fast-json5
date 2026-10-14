@@ -7,12 +7,12 @@ import { describe, expect, it } from 'vitest'
 import { json5Document, jsonDocument, mutatedDocument } from './support/arbitraries.js'
 import { expectSameAsJson5, expectSameErrorPosition, expectSameReviverCalls } from './support/differential.js'
 import { json5Parse } from './support/oracle.js'
-import { Scanner } from '../src/transform.js'
+import { scanFast } from '../src/transform.js'
 
 /** Whether the fast path alone (runLax + JSON.parse) parses `text`, i.e. no strict fallback ran. */
 function fastPathHandles(text: string): boolean {
   try {
-    const json = new Scanner(text).runLax()
+    const json = scanFast(text, false)
     if (json === undefined) return false
     JSON.parse(json)
     return true
