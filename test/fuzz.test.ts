@@ -7,6 +7,19 @@ import { describe, expect, it } from 'vitest'
 import { json5Document, jsonDocument, mutatedDocument } from './support/arbitraries.js'
 import { expectSameAsJson5, expectSameReviverCalls } from './support/differential.js'
 import { json5Parse } from './support/oracle.js'
+import { Scanner } from '../src/transform.js'
+
+/** Whether the fast path alone (runLax + JSON.parse) parses `text`, i.e. no strict fallback ran. */
+function fastPathHandles(text: string): boolean {
+  try {
+    const json = new Scanner(text).runLax()
+    if (json === undefined) return false
+    JSON.parse(json)
+    return true
+  } catch {
+    return false
+  }
+}
 
 const numRuns = process.env.FAST_JSON5_TEST_MODE === 'fuzz' ? 200_000 : 300
 
@@ -43,6 +56,12 @@ describe('generators', () => {
       .filter(([, pattern]) => sample.filter((text) => pattern.test(text)).length < sample.length * 0.01)
       .map(([name]) => name)
     expect(missing).toEqual([])
+  })
+
+  it('the fast path handles valid documents itself, without the strict fallback', () => {
+    const declined = fc.sample(json5Document, { numRuns: 3000, seed: 99 }).filter((text) => !fastPathHandles(text))
+    // Only a few exotic forms are left to the strict scanner (see fastPathHandles below).
+    expect(declined.slice(0, 5)).toEqual([])
   })
 
   it('jsonDocument only produces documents JSON.parse accepts', () => {

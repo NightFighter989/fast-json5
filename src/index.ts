@@ -22,13 +22,45 @@ export interface ParseOptions {
 export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseOptions): T {
   const options: ParseOptions =
     typeof reviverOrOptions === 'function' ? { reviver: reviverOrOptions } : (reviverOrOptions ?? {})
-  // The scanner validates the whole document and throws positioned errors, so JSON.parse only
-  // ever sees valid JSON.
-  const scanner = new Scanner(String(text), options.nonFinite === 'reject')
-  const json = scanner.run()
-  if (!scanner.nan) return JSON.parse(json, options.reviver)
+  const src = String(text)
+  const reject = options.nonFinite === 'reject'
 
+  // Fast path: rewrite JSON5 tokens, skip plain JSON with native regex runs, and let JSON.parse
+  // validate the structure.
+  const fast = new Scanner(src, reject)
+  let json: string | undefined
+  try {
+    json = fast.runLax()
+  } catch {
+    json = undefined
+  }
+  if (json !== undefined) {
+    try {
+      return build(json, fast.nan, options.reviver)
+    } catch (error) {
+      // A reviver's own exception must propagate as-is (and the reviver must not run twice).
+      if (options.reviver && isValidJSON(json)) throw error
+    }
+  }
+
+  // Slow path, only for invalid input or rare valid forms the fast path declines: the strict
+  // scanner validates the full grammar, throwing a SyntaxError positioned in the original text.
+  const strict = new Scanner(src, reject)
+  return build(strict.run(), strict.nan, options.reviver)
+}
+
+function build<T>(json: string, nan: boolean, reviver: Reviver | undefined): T {
+  if (!nan) return JSON.parse(json, reviver)
   // NaN path: swap sentinels back first, so a reviver only ever sees real NaN values.
   const value = restoreNaN(JSON.parse(json))
-  return (options.reviver ? internalize({ '': value }, '', options.reviver) : value) as T
+  return (reviver ? internalize({ '': value }, '', reviver) : value) as T
+}
+
+function isValidJSON(json: string): boolean {
+  try {
+    JSON.parse(json)
+    return true
+  } catch {
+    return false
+  }
 }

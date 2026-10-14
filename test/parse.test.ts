@@ -279,6 +279,39 @@ describe('structure', () => {
   })
 })
 
+// The fast path rewrites tokens under local rules and lets JSON.parse check structure. These pin
+// the inputs where a careless local rule would turn invalid JSON5 into valid JSON.
+describe('fast-path soundness', () => {
+  it('never lets a rewritten value act as a key', () => {
+    for (const text of ['{-NaN: 1}', '{+NaN: 1}', '{NaN /**/ : 1, a: 1}', '{-Infinity: 1}', '{0x1: 1}', '{.5: 1}', '{1: 2}']) {
+      if (text.startsWith('{NaN')) expectParse(text, { NaN: 1, a: 1 })
+      else expectReject(text)
+    }
+  })
+
+  it('never merges a rewritten number with a neighbour', () => {
+    for (const text of ['1Infinity', '[1Infinity]', '[0x1.5]', '[1.5.5]', '[Infinity5]', '[NaN1]', '[5.e]', '[0x1g]', '[1.e5.]', '[.5.5]', '[-.5e1.0]', '[1/**/Infinity]']) {
+      expectReject(text)
+    }
+  })
+
+  it('drops only commas that follow a value', () => {
+    for (const text of ['[/*c*/,]', '[ , /*c*/ ]', '{"a":,}', '{"a",}', '{a,}', `[1,,${BOM}]`, '[,// c\n]']) expectReject(text)
+    expectParse(`[1,${BOM}]`, [1])
+    expectParse('[1, /* c */ // d\n]', [1])
+    expectParse(`{"a": [], ${NBSP}}`, { a: [] })
+  })
+
+  it('treats literals followed by a colon as keys, however the colon is reached', () => {
+    expectParse('{true /* c */ : 1, null\v: 2, false// c\n: 3}', { true: 1, null: 2, false: 3 })
+    expectParse('{trueish: 1, nullable: 2}', { trueish: 1, nullable: 2 })
+  })
+
+  it('rejects words that are neither keys nor literals', () => {
+    for (const text of ['[undefined]', '[a]', '{"a": b}', '[Infinityx]', '[True]']) expectReject(text)
+  })
+})
+
 describe('errors', () => {
   it('reports the position in the original source', () => {
     const error = syntaxErrorOf(() => parse('{\n  a: 1,\n  b c\n}'))

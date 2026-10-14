@@ -41,12 +41,16 @@ export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseO
 
 ## Core design
 
-### 1. One scanner, copy only when something changes
+### 1. Two scanners: a fast path that always runs, and a strict one for errors (phase 5)
 
-- The scanner tracks a cursor index and a `last` index. The output is an array of chunks: `text.slice(last, i)` followed by the replacement text.
-- If nothing needed rewriting, it **returns the original string**. That means no copy, and pure JSON costs one scan plus `JSON.parse`.
-- It jumps over long runs with sticky (`/y`) regexes and `indexOf`. Examples: string bodies via `/[^"'\\\x00-\x1f]*/y`, comment bodies via `indexOf('*/')` and `indexOf('\n')`, and runs of plain whitespace and number characters. It only handles characters one at a time at token boundaries.
-- We'll benchmark an alternative: try `JSON.parse(text)` first and run the scanner only if that throws. This wins when inputs are mostly pure JSON. When they aren't, it costs an extra failed parse. The default will be whichever wins on the benchmark corpus.
+**Decision (2026-10-14):** the transform always runs. There is no "try `JSON.parse` on the raw input first" path; speed comes from the scanner itself.
+
+`parse()` (in `src/index.ts`) works like this:
+1. **Fast path, `Scanner.runLax()`.** One sticky regex (`JSON_RUN`) consumes each maximal run of plain-JSON tokens in a single native call. A whole pure-JSON document is one call, at about 0.35 ms for 318 KiB. JS code only wakes up where JSON5 syntax may start, and rewrites that token under a local rule (§3). Structure isn't tracked; `JSON.parse` validates it.
+2. `JSON.parse` on the output. If nothing was rewritten, the output is the input string itself, with no copy.
+3. **Slow path, only if step 1 bailed or step 2 threw:** `Scanner.run()`, the strict token-level state machine from phase 2. For invalid input it throws a `SyntaxError` positioned in the original text. For the rare valid form the fast path declines (e.g. `{true /* c */ : 1}`), it produces correct JSON. A reviver's own exception is told apart from a syntax error (the JSON is re-checked without the reviver), so it propagates unchanged and the reviver never runs twice.
+
+Output is built by string concatenation (`out = out + slice + text`). V8 makes rope strings, and `JSON.parse` flattens them in one native pass. Measured on 20k edits: rope 1.0 ms, parts-and-`join` 1.9 ms, `Uint16Array` plus `TextDecoder` 2.2 ms. Native `String.prototype.replace` with a callback took 4.9 ms just for the replacement, so it lost too.
 
 ### 2. Rewrites
 
@@ -68,36 +72,35 @@ export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseO
 
 Inputs that are invalid in both JSON5 and JSON, and must stay invalid: leading zeros (`01`), escapes `\1` through `\9`, unterminated strings and comments, raw line terminators in strings, and lone surrogates in `\u` key escapes that don't form an identifier.
 
-### 3. Strictness: the scanner is a full token-level validator (as built in phase 2)
+### 3. Strictness: local rules on the fast path, the full grammar on the slow path
 
-The scanner must never turn invalid JSON5 into valid JSON. The original idea was to validate only the contexts we rewrite and let `JSON.parse` catch the rest. In practice the scanner already has to read every string body (for escapes and raw control characters) and every number (for normalising), so checking the token grammar as well costs almost nothing. **So `transform()` validates the whole JSON5 grammar, and `JSON.parse` only builds values.** That has three consequences:
+Neither path may turn invalid JSON5 into valid JSON, or change a value.
 
-- `JSON.parse` never sees invalid JSON, so a `JSON.parse` error would mean an internal bug, and the fuzzer is what checks for that.
-- **Every error comes from the scanner, with its offset in the original source.** No offset map and no second validator are needed. That makes phase 4 much smaller: it's about the wording of messages and agreeing with json5's positions.
-- Rewrites don't need to keep lengths the same. Comments and exotic whitespace are simply dropped.
+**Fast path (`runLax`).** Each rewrite replaces one JSON5 token with a JSON token that has the same meaning and grammatical role. `JSON.parse` then rejects any structure that was wrong in the source. The rules below are where that argument needs care. Each one was found or confirmed by the corrupted-document fuzzer.
+- **Plain-JSON runs:** `JSON_RUN` refuses tokens that are really the start of JSON5 syntax. A number isn't consumed if `.`, `e`, `x` or a digit continues it, so `5.` and `1.e5` are read whole. A literal is consumed only before `,` `]` `}` or end of input (`trueish`, `null:` and `true /* c */ :` go to JS). A comma is consumed only before a plain-JSON value start.
+- **Comments and exotic whitespace** become a space, never the empty string. Otherwise `1/**/2` could become `12`.
+- **Trailing commas** are dropped only when the previous significant character ends a value (not `,` `[` `{` `:`) and the next one is a closer. This keeps `[,]`, `[1,,]` and `{"a":,}` invalid. The previous character is worked out only when a comma or comment needs it.
+- **Bare words** are quoted only when a `:` follows, so they can only ever end up as keys. Non-keys must be `true`, `false`, `null`, `Infinity` or `NaN`; anything else bails.
+- **Numbers** rewritten in JS must not touch an identifier character, digit or `.` on either side (`1Infinity` would become `11e400`), and must not be followed by `:`. The colon check exists because `-NaN` becomes the sentinel *string*, which `JSON.parse` would accept as a key; the fuzzer found this.
 
-Implementation (`src/transform.ts`):
-- An iterative state machine with five states: value, element-or-`]`, key-or-`}`, `:`, and after-value. A boolean stack records container types, so there's no recursion and depth isn't limited (tested to 100k).
-- The output is a list of parts: source slices interleaved with replacements. If no part was ever written, the input string itself is returned.
-- **Trailing commas:** the position of each comma is recorded when it's seen. If the next significant token turns out to be a closer, the comma is removed: either as a direct edit, or by patching the source slice that holds it when comments between the comma and the closer have already been edited.
-- **Hot paths:** strings jump over runs with sticky regexes (`[^"\\\x00-\x1f]*`); numbers use a JSON-number regex and fall back to the full JSON5 regex only when the next character continues the number (`.`, `x`, `e`, or a digit); keys use an ASCII run regex, with a `\p{...}` check per code point for anything else.
+**Slow path (`run`).** This is the phase 2 state machine: five states (value, element-or-`]`, key-or-`}`, `:`, after-value), a boolean container stack (iterative, so depth is unlimited), and full validation with errors positioned in the original source. Trailing commas are decided by looking ahead at the comma, so edits stay in source order.
+
+**Shared token readers** handle strings (sticky-regex runs over `[^"\\\x00-\x1f]*`), numbers (the JSON-number regex, falling back to the JSON5-number regex only when needed), and identifiers (an inline ASCII loop, with `\p{...}` checks per code point for anything else). They validate tokens the same way on both paths.
 
 ### 4. Infinity, -Infinity and NaN
 
-- **Infinity needs no sentinel (done in phase 2).** `JSON.parse` turns an overflowing literal into `Infinity` (the spec requires it, so every engine does it), so `Infinity` becomes `1e400` and `-Infinity` becomes `-1e400`. Huge hex literals become the same values. Only **NaN** still needs the sentinel design below.
-- Emit a sentinel string such as `"\u0000fj5:Infinity"`. Set a flag only when the scanner emits one.
-- **No sentinel emitted** (the usual case): call `JSON.parse` with no fix-up at all.
-- **Sentinel emitted, no user reviver:** walk the result once after parsing and replace the sentinels. That should be faster than a reviver; to be benchmarked.
-- **Sentinel emitted and a user reviver:** wrap the reviver so it restores the sentinel before calling the user's function, so the user sees real numbers.
-- **Collisions:** the scanner already reads every string, so it can check whether any source string starts with the sentinel prefix. If one does, it switches to a different prefix.
-- `nonFinite: 'reject'` throws at the token instead.
-- Don't patch by path: with duplicate keys (`{a: Infinity, a: 1}`), patching by path would overwrite the wrong value.
+As built (phases 2 and 3):
+- **Infinity needs no sentinel.** `JSON.parse` turns an overflowing literal into `Infinity` (the spec requires it, so every engine does it). So `Infinity` becomes `1e400` and `-Infinity` becomes `-1e400`, and huge hex literals become the same values.
+- **NaN** becomes a sentinel string (in `src/nan.ts`): NUL, then `fast-json5:NaN:`, then a **per-process random suffix**. Input can't produce it by accident, and an attacker can't guess it. The scanner sets a flag only when it writes one, so documents without `NaN` pay nothing.
+- **Sentinel written, no reviver:** an iterative walk after `JSON.parse` swaps sentinels back to `NaN`, assigning `__proto__` keys with `defineProperty`. Sentinels are found by value, not by path, so duplicate keys such as `{a: NaN, a: 1}` are handled correctly.
+- **Sentinel written and a reviver:** sentinels are restored first, then the reviver runs in JS (ECMA-262 InternalizeJSONProperty), so it only ever sees real `NaN`. Call order matches json5's; there's a fuzz property for it.
+- `nonFinite: 'reject'` throws at an `Infinity` or `NaN` *literal*. Overflowing numbers such as `1e400` still parse to `Infinity`, as they do in `JSON.parse`.
 
 ### 5. Identifiers
 
 - Keys may be any ES5.1 IdentifierName. A key starts with a Unicode letter (Lu, Ll, Lt, Lm, Lo or Nl), `$`, `_` or a `\uXXXX` escape. Later characters may also be Mn, Mc, Nd, Pc, U+200C or U+200D.
 - Fast path: `/[A-Za-z0-9$_]*/y`. If that stops at a non-ASCII character or `\`, each code point is checked against the exact spec categories (`\p{Lu}\p{Ll}...` rather than `\p{ID_Start}`, which also includes Other_ID_Start), and each `\uXXXX` escape is decoded and checked the same way. Code points are used rather than code units, as json5 does, so astral letters are accepted.
-- Known edge: `json5` ships a Unicode table generated for an older Unicode version, so the two may disagree on very new characters. Document this and exclude those characters from differential fuzzing.
+- **Known difference:** json5 ships identifier tables from Unicode 10, while fast-json5 uses the engine's current Unicode data. So keys using letters added later (e.g. Lao U+0E90, added in Unicode 12) are accepted here and rejected by json5. That follows the spec, which tracks current Unicode. The differential check recognises exactly this case and skips it.
 
 ### 6. Semantics that must match `json5` and `JSON.parse`
 
@@ -140,6 +143,18 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 - **Runtimes:** current Node LTS and Bun, at minimum.
 - **Baseline** (Node 22, 318 KiB pure JSON, scaffold day): `JSON.parse` 1.3 ms, `strip-json-comments` + `JSON.parse` 12.1 ms, `json5` 35.5 ms. That's about 27× between `json5` and the native ceiling. On JSONC, `strip-json-comments` takes about 16 ms, so a single-pass scanner that is quicker than it will also win on the JSONC subset.
 - **After phase 2** (same machine, no tuning yet): pure JSON 3.7 ms (2.8× `JSON.parse`, 9× faster than json5); JSONC 4.3 ms (8.7× json5, 4× faster than `strip-json-comments`); full JSON5 7.9 ms (4.4× json5). Pure JSON is the gap: it pays for a full scan with nothing to rewrite, so trying `JSON.parse` first is the obvious phase 5 experiment.
+- **After phase 5** (Node 22, `npm run bench`; the two small configs are ~0.5 KiB):
+
+  | Input | fast-json5 | vs `JSON.parse` | vs json5 | vs strip-json-comments |
+  | --- | --- | --- | --- | --- |
+  | Pure JSON, 318 KiB | 1.50 ms | 1.24× slower | 20× faster | 7.4× faster |
+  | Minified JSON, 154 KiB | 1.23 ms | 1.22× slower | 17× faster | 3.6× faster |
+  | JSONC, 348 KiB | 1.89 ms | — | 17× faster | 7.2× faster |
+  | Full JSON5, 328 KiB | 4.53 ms | — | 6.9× faster | — |
+  | Small JSON config | 3.3 µs | 1.16× slower | 17× faster | 4.4× faster |
+  | Small JSON5 config | 8.8 µs | — | 5.2× faster | — |
+
+  Where the JSON5 time goes: on the 328 KiB case, the scan takes 2.8 ms, flattening the output rope 0.5 ms and `JSON.parse` 1.1 ms. The scan cost is mostly building the output (about 20k edits at roughly 50 ns each). Pure JSON is one regex call at about 0.35 ms plus `JSON.parse`.
 - **Targets to beat before v0.1.0:** at least 5× `json5` on realistic JSON5, and within about 1.3× of `JSON.parse` on pure JSON.
 
 ## Packaging and release
@@ -159,9 +174,9 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 | **0. Scaffold** ✅ | package, build, test, bench harness | `npm run build && npm test` pass |
 | **1. Test bed** ✅ | json5-tests vendored, differential harness, error-position helpers | Suite runs (and mostly fails) against the stub |
 | **2. Scanner** ✅ | comments, trailing commas, whitespace, keys, strings, escapes, numbers, Infinity | Conformance suite passes, except NaN; the two fuzz `it.fails` become `it` |
-| **3. NaN** | sentinel, post-walk, reviver wrapping, `nonFinite: 'reject'` (Infinity was done in phase 2) | All of json5-tests passes; fuzz NaN filter removed; fuzzer clean for 1M cases |
+| **3. NaN** ✅ | sentinel, post-walk, JS reviver on the NaN path, `nonFinite: 'reject'` (Infinity was done in phase 2) | All of json5-tests passes; fuzz NaN filter removed |
 | **4. Errors** | message wording, position rules (see open questions), exported error type | Error tests pass; messages are the same on every engine |
-| **5. Performance** | sticky-regex skipping, JSON.parse-first experiment, profiling | Targets in "Benchmarks" are met |
+| **5. Performance** ✅ | fast path with `JSON_RUN` and local rules, strict fallback, rope output, regex alternative ordering | Targets in "Benchmarks" are met (see the table) |
 | **6. Release 0.1.0** | CI, README with table, provenance publish | `npm i fast-json5` works in ESM, CJS and TS projects |
 
 ## Dev notes
@@ -172,6 +187,6 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 
 - Minimum Node version: 18 is already end-of-life. Should we require 20?
 - Should `toJSON(text)` be exported in v0.1, or held back?
-- JSON.parse-first vs scan-first as the default: the benchmarks will decide.
+- ~~JSON.parse-first vs scan-first~~ Decided: the transform always runs (see §1).
 - Error line numbers: copy json5 (only LF starts a new line), or follow ECMAScript (CR, CRLF, U+2028 and U+2029 all do)? Copying json5 keeps it a true drop-in and makes differential testing of positions trivial. The ECMAScript rule is more correct for files with CR-only line endings.
 - Is it worth adding a `stringify` later? Out of scope for now.

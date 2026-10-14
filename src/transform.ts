@@ -36,6 +36,23 @@ const KEY = 2 // a key or '}' (after '{' or ',' in an object)
 const AFTER_KEY = 3 // ':'
 const AFTER_VALUE = 4 // ',', a closer, or end of input at the top level
 
+/**
+ * The fast path's workhorse: consumes a maximal run of plain-JSON tokens (and JSON whitespace) in
+ * one native regex call, with no structure checks; JSON.parse validates structure afterwards.
+ * Each alternative refuses to consume a token that is really the start of JSON5 syntax, so the
+ * run stops exactly where a rewrite may be needed. Alternatives are ordered by frequency, and
+ * punctuation and commas swallow the whitespace after them; that order measured ~35% faster.
+ * The rules:
+ * - strings: only those whose escapes are all valid JSON;
+ * - numbers: not if JSON5 continues them (`5.`, `0x1`, `1.e5`), so the JSON5 number is read whole;
+ * - literals: only when JSON whitespace and `,` `]` `}` or the end follow, so identifiers
+ *   (`trueish`) and keys (`null:`, or a comment before the colon) are left for the JS word handler;
+ * - commas: only when a plain-JSON token follows, so a possibly-trailing comma (before a closer,
+ *   a comment, JSON5 whitespace or JSON5 syntax) is left for the JS trailing-comma check.
+ */
+const JSON_RUN =
+  /(?:"[^"\\\x00-\x1f]*(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})[^"\\\x00-\x1f]*)*"|[{}[\]:][ \t\n\r]*|[ \t\n\r]+|,[ \t\n\r]*(?=["[{0-9tfn-])|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?(?![.eExX0-9])|(?:true|false|null)(?=[ \t\n\r]*(?:[,\]}]|$)))*/y
+
 const JSON_NUMBER = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y
 const JSON5_NUMBER = /([+-]?)(?:0[xX]([0-9a-fA-F]+)|(Infinity)|(NaN)|(0|[1-9][0-9]*)?(\.[0-9]*)?([eE][+-]?[0-9]+)?)/y
 const DOUBLE_QUOTED_RUN = /[^"\\\x00-\x1f]*/y
@@ -70,10 +87,12 @@ export class Scanner {
   /** Set once a NaN sentinel has been written; parse() then restores NaN after JSON.parse. */
   nan = false
   pos = 0
-  /** Start of the source not yet copied into `parts`. */
+  /** Start of the source not yet copied into `out`. */
   last = 0
-  /** Output so far, as source slices interleaved with replacements. Empty while nothing changed. */
-  parts: string[] = []
+  /** Output so far, up to `last`. */
+  out = ''
+  /** Whether any edit happened; if not, the input is returned as-is. */
+  edited = false
 
   constructor(src: string, rejectNonFinite = false) {
     this.src = src
@@ -85,10 +104,6 @@ export class Scanner {
     /** One entry per open container: true for an object, false for an array. */
     const stack: boolean[] = []
     let state = VALUE
-    // The comma most recently consumed, if it may turn out to be a trailing comma.
-    let comma = -1
-    let commaParts = 0
-    let commaLast = 0
 
     for (;;) {
       const c = this.skipSpace()
@@ -96,9 +111,9 @@ export class Scanner {
 
       if (state === AFTER_VALUE) {
         if (c === COMMA && stack.length > 0) {
-          comma = at
-          commaParts = this.parts.length
-          commaLast = this.last
+          // Trailing comma: a closer is next. Decided by lookahead, so edits stay in source order.
+          const next = src.charCodeAt(this.lookahead(at + 1))
+          if (next === CLOSE_BRACKET || next === CLOSE_BRACE) this.edit(at, at + 1, ' ')
           this.pos = at + 1
           state = stack[stack.length - 1] ? KEY : ELEMENT
         } else if ((c === CLOSE_BRACKET || c === CLOSE_BRACE) && stack.length > 0 && stack[stack.length - 1] === (c === CLOSE_BRACE)) {
@@ -120,15 +135,11 @@ export class Scanner {
       }
 
       if ((state === KEY && c === CLOSE_BRACE) || (state === ELEMENT && c === CLOSE_BRACKET)) {
-        if (comma !== -1) this.dropComma(comma, commaParts, commaLast)
-        comma = -1
         stack.pop()
         this.pos = at + 1
         state = AFTER_VALUE
         continue
       }
-
-      comma = -1
 
       if (state === KEY) {
         if (c === DOUBLE_QUOTE || c === SINGLE_QUOTE) this.string(c)
@@ -155,32 +166,166 @@ export class Scanner {
     }
   }
 
-  /** Replace `src[from, to)` with `text` in the output. Calls must arrive in source order. */
+  /**
+   * Fast path. Skips plain JSON with one regex call per run and rewrites only JSON5 tokens, each
+   * under a local rule that can only make invalid JSON5 *stay* invalid; structure is left for
+   * JSON.parse to validate. Returns undefined when it meets anything it can't rewrite with
+   * certainty; the caller then falls back to the strict `run()`, which also produces the error.
+   *
+   * Soundness (the output parses only if the input is valid JSON5, to the same value) rests on:
+   * - every rewrite turns one JSON5 token into a JSON token with the same meaning and role;
+   * - comments and whitespace become a space, so neighbouring tokens never merge;
+   * - a comma is dropped only between a complete value and a closer;
+   * - a bare word is quoted only when followed by `:`, so it can only ever end up as a key;
+   * - a number or word rewritten here must not touch an identifier character or digit on either
+   *   side, as JSON5's own tokenizer requires (otherwise `1Infinity` could become `11e400`).
+   */
+  runLax(): string | undefined {
+    const src = this.src
+    const n = src.length
+    let i = 0
+    // Last significant source character before `i`, for the trailing-comma rule (-1: none yet).
+    let prev = -1
+    for (;;) {
+      let c = src.charCodeAt(i)
+      let runEnd = i
+      // Skip the regex call when the next token can only be JSON5 (the run would be empty).
+      if (!(c === SINGLE_QUOTE || c === SLASH || (isAsciiIdentifierStart(c) && c !== 116 && c !== 102 && c !== 110))) {
+        JSON_RUN.lastIndex = i
+        JSON_RUN.test(src)
+        runEnd = JSON_RUN.lastIndex
+        if (runEnd >= n) return this.finish()
+        c = src.charCodeAt(runEnd)
+      }
+      if (runEnd > i) {
+        // Only the comma rule reads `prev`, and only commas, comments and whitespace can come
+        // between the run and that comma; every other handler below sets `prev` itself.
+        if (c === COMMA || c === SLASH || c === VT || c === FF || c > 127) {
+          let k = runEnd - 1
+          while (k >= i && isJsonSpace(src.charCodeAt(k))) k--
+          if (k >= i) prev = src.charCodeAt(k)
+        }
+        i = runEnd
+      }
+
+      if (c === COMMA) {
+        // Not consumed by JSON_RUN, so it may be trailing: followed by a closer or a comment.
+        const next = src.charCodeAt(this.lookahead(i + 1))
+        if ((next === CLOSE_BRACKET || next === CLOSE_BRACE) && prev !== -1 && prev !== COMMA && prev !== OPEN_BRACKET && prev !== OPEN_BRACE && prev !== COLON) {
+          this.edit(i, i + 1, ' ')
+        } else {
+          prev = COMMA
+        }
+        i++
+      } else if (c === SLASH) {
+        i = this.comment(i)
+      } else if (c === DOUBLE_QUOTE || c === SINGLE_QUOTE) {
+        this.pos = i
+        this.string(c)
+        i = this.pos
+        prev = DOUBLE_QUOTE
+      } else if ((c >= ZERO && c <= NINE) || c === MINUS || c === PLUS || c === DOT) {
+        if (!this.separatedBefore(i)) return undefined
+        this.pos = i
+        this.number()
+        i = this.pos
+        // A number is never a key; checked because -NaN becomes a *string* (the sentinel), which
+        // JSON.parse would otherwise accept before a colon.
+        if (!this.separatedAfter(i) || src.charCodeAt(this.lookahead(i)) === COLON) return undefined
+        prev = ZERO
+      } else if (isAsciiIdentifierStart(c) || c === BACKSLASH || (c > 127 && !isUnicodeSpace(c))) {
+        if (!this.separatedBefore(i)) return undefined
+        // Plain ASCII identifiers are read inline; identifierEnd handles escapes and Unicode.
+        let end = i + 1
+        let d = src.charCodeAt(end)
+        while (isAsciiIdentifierPart(d)) d = src.charCodeAt(++end)
+        if (d === BACKSLASH || d > 127 || c === BACKSLASH || c > 127) end = this.identifierEnd(i)
+        const after = src.charCodeAt(end)
+        const isKey =
+          after === COLON ||
+          (after === SPACE && src.charCodeAt(end + 1) === COLON) ||
+          src.charCodeAt(this.lookahead(end)) === COLON
+        if (isKey) {
+          this.edit(i, end, `"${src.slice(i, end)}"`)
+          // Step over an adjacent colon and JSON whitespace here rather than with a regex call.
+          i = after === COLON ? end + 1 : after === SPACE && src.charCodeAt(end + 1) === COLON ? end + 2 : end
+          if (i > end) {
+            prev = COLON
+            while (isJsonSpace(src.charCodeAt(i))) i++
+          } else {
+            prev = DOUBLE_QUOTE
+          }
+        } else {
+          const length = end - i
+          const word = length === 4 || length === 5 || length === 8 || length === 3 ? src.slice(i, end) : ''
+          if (word === 'Infinity' || word === 'NaN') {
+            this.pos = i
+            this.number()
+          } else if (word !== 'true' && word !== 'false' && word !== 'null') {
+            return undefined
+          }
+          prev = ZERO
+          i = end
+        }
+      } else if (c === VT || c === FF || isUnicodeSpace(c)) {
+        this.edit(i, i + 1, ' ')
+        i++
+      } else {
+        return undefined
+      }
+    }
+  }
+
+  /** Index of the next significant character at or after `i`, skipping whitespace and comments. Edits nothing. */
+  lookahead(i: number): number {
+    const src = this.src
+    for (;;) {
+      const c = src.charCodeAt(i)
+      if (c === SPACE || c === LF || c === CR || c === TAB || c === VT || c === FF || (c > 127 && isUnicodeSpace(c))) {
+        i++
+      } else if (c === SLASH && src.charCodeAt(i + 1) === SLASH) {
+        LINE_COMMENT_BODY.lastIndex = i + 2
+        LINE_COMMENT_BODY.test(src)
+        i = LINE_COMMENT_BODY.lastIndex
+      } else if (c === SLASH && src.charCodeAt(i + 1) === ASTERISK) {
+        const close = src.indexOf('*/', i + 2)
+        if (close === -1) return src.length
+        i = close + 2
+      } else {
+        return i
+      }
+    }
+  }
+
+  /** A number or word may start at `i` only if no identifier character or digit touches it from the left. */
+  separatedBefore(i: number): boolean {
+    if (i === 0) return true
+    const c = this.src.charCodeAt(i - 1)
+    if (c > 127) return !isIdentifierChar(c, false)
+    return !(isAsciiIdentifierStart(c) || (c >= ZERO && c <= NINE) || c === DOT || c === BACKSLASH)
+  }
+
+  /** A number ending before `i` must not be followed by an identifier character, digit or dot. */
+  separatedAfter(i: number): boolean {
+    const c = this.src.charCodeAt(i)
+    if (c > 127) return !isIdentifierChar(this.src.codePointAt(i) as number, false)
+    return !(isAsciiIdentifierStart(c) || (c >= ZERO && c <= NINE) || c === DOT || c === BACKSLASH)
+  }
+
+  /**
+   * Replace `src[from, to)` with `text` in the output. Calls must arrive in source order.
+   * Builds by concatenation: V8 makes cheap rope strings, which JSON.parse flattens in one
+   * native pass. That measured faster than collecting parts and joining them.
+   */
   edit(from: number, to: number, text: string): void {
-    if (from > this.last) this.parts.push(this.src.slice(this.last, from))
-    this.parts.push(text)
+    this.out = this.out + this.src.slice(this.last, from) + text
+    this.edited = true
     this.last = to
   }
 
   finish(): string {
-    if (this.parts.length === 0) return this.src
-    this.parts.push(this.src.slice(this.last))
-    return this.parts.join('')
-  }
-
-  /**
-   * Remove a trailing comma once the closer after it has been seen. Comments or whitespace
-   * between the two may already have been edited, in which case the comma sits inside the
-   * source slice that was pushed first after it was recorded.
-   */
-  dropComma(comma: number, partsBefore: number, lastBefore: number): void {
-    if (this.parts.length === partsBefore) {
-      this.edit(comma, comma + 1, '')
-      return
-    }
-    const slice = this.parts[partsBefore] as string
-    const k = comma - lastBefore
-    this.parts[partsBefore] = slice.slice(0, k) + slice.slice(k + 1)
+    if (!this.edited) return this.src
+    return this.out + this.src.slice(this.last)
   }
 
   /** Skip whitespace and comments, removing the ones JSON doesn't allow. Returns the next char code, or -1 at the end. */
@@ -194,7 +339,7 @@ export class Scanner {
       } else if (c === SLASH) {
         i = this.comment(i)
       } else if (c > 127 ? isUnicodeSpace(c) : c === VT || c === FF) {
-        this.edit(i, i + 1, '')
+        this.edit(i, i + 1, ' ')
         i++
       } else {
         this.pos = i
@@ -218,7 +363,7 @@ export class Scanner {
     } else {
       throw unexpected(src, start)
     }
-    this.edit(start, end, '')
+    this.edit(start, end, ' ')
     return end
   }
 
@@ -226,7 +371,9 @@ export class Scanner {
     const src = this.src
     const run = quote === DOUBLE_QUOTE ? DOUBLE_QUOTED_RUN : SINGLE_QUOTED_RUN
     const start = this.pos
-    if (quote === SINGLE_QUOTE) this.edit(start, start + 1, '"')
+    // A single-quoted string with nothing to rewrite inside becomes one edit. The opening quote is
+    // only written separately once an inner edit is needed, to keep edits in source order.
+    let openPending = quote === SINGLE_QUOTE
     let i = start + 1
     for (;;) {
       run.lastIndex = i
@@ -234,9 +381,14 @@ export class Scanner {
       i = run.lastIndex
       const c = src.charCodeAt(i)
       if (c === quote) {
-        if (quote === SINGLE_QUOTE) this.edit(i, i + 1, '"')
+        if (openPending) this.edit(start, i + 1, `"${src.slice(start + 1, i)}"`)
+        else if (quote === SINGLE_QUOTE) this.edit(i, i + 1, '"')
         this.pos = i + 1
         return
+      }
+      if (openPending && c === c) {
+        this.edit(start, start + 1, '"')
+        openPending = false
       }
       if (c === BACKSLASH) {
         i = this.escape(i)
@@ -310,22 +462,27 @@ export class Scanner {
   }
 
   identifier(): void {
-    const src = this.src
     const start = this.pos
+    const end = this.identifierEnd(start)
+    // The identifier's characters (including \uXXXX escapes) are all valid inside a JSON string.
+    this.edit(start, end, `"${this.src.slice(start, end)}"`)
+    this.pos = end
+  }
+
+  /** End of the (validated) identifier starting at `start`; throws if none starts there. */
+  identifierEnd(start: number): number {
+    const src = this.src
     let i = isAsciiIdentifierStart(src.charCodeAt(start)) ? start + 1 : this.unicodeIdentifierChar(start, true)
     for (;;) {
       ASCII_IDENTIFIER_PART.lastIndex = i
       ASCII_IDENTIFIER_PART.test(src)
       i = ASCII_IDENTIFIER_PART.lastIndex
       const c = src.charCodeAt(i)
-      if (c !== BACKSLASH && !(c > 127)) break
+      if (c !== BACKSLASH && !(c > 127)) return i
       const next = this.unicodeIdentifierChar(i, false)
-      if (next === i) break
+      if (next === i) return i
       i = next
     }
-    // The identifier's characters (including \uXXXX escapes) are all valid inside a JSON string.
-    this.edit(start, i, `"${src.slice(start, i)}"`)
-    this.pos = i
   }
 
   /**
@@ -416,4 +573,12 @@ function isIdentifierChar(cp: number, isStart: boolean): boolean {
 /** `\uXXXX` for a code unit, built at runtime so no escape sequence appears literally in source. */
 function unicodeEscape(code: number): string {
   return `\\u${code.toString(16).padStart(4, '0')}`
+}
+
+function isJsonSpace(c: number): boolean {
+  return c === SPACE || c === LF || c === CR || c === TAB
+}
+
+function isAsciiIdentifierPart(c: number): boolean {
+  return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= ZERO && c <= NINE) || c === 36 || c === 95
 }

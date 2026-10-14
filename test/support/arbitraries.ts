@@ -179,9 +179,23 @@ const corruptionChar = pick(
   '0', '1', '.', '+', '-', ' ', '\t', '\n', '\r', '\u2028', '\u0000',
 )
 
-const mutation = fc.record({ kind: pick('insert', 'delete', 'replace'), at: fc.nat(), char: corruptionChar })
+/**
+ * Whole tokens, for the fast path's local rules: signed NaN/Infinity next to colons and digits,
+ * hex and dotted numbers next to other numbers, comments and JSON5 whitespace next to commas.
+ */
+const corruptionToken = pick(
+  'NaN', '-NaN', 'Infinity', '+Infinity', '0x', '0x1', '.5', '5.', '1e', 'true', 'null', 'a', '$_',
+  ' : ', ',', ', ', '/**/', '//c\n', String.fromCharCode(0xfeff), String.fromCharCode(0xa0), '\v',
+  "'", "''", '"', '""', '\\u0061', '\\x41', '\\', '[', ']', '{', '}',
+)
 
-/** A valid JSON or JSON5 document with 1-3 single-character edits. May or may not still be valid. */
+const mutation = fc.record({
+  kind: pick('insert', 'delete', 'replace'),
+  at: fc.nat(),
+  char: fc.oneof({ arbitrary: corruptionChar, weight: 3 }, { arbitrary: corruptionToken, weight: 2 }),
+})
+
+/** A valid JSON or JSON5 document with 1-3 small edits (characters or whole tokens). May or may not still be valid. */
 export const mutatedDocument: Arbitrary<string> = fc
   .tuple(fc.oneof(jsonDocument, json5Document), fc.array(mutation, { minLength: 1, maxLength: 3 }))
   .map(([doc, mutations]) =>
