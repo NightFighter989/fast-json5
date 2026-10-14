@@ -42,14 +42,17 @@
     "dev": "tsdown --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
     "bench": "node bench/index.js",
     "lint:pkg": "publint && attw --pack .",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run lint:pkg"
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run lint:pkg",
+    "test:fuzz": "vitest run test/fuzz.test.ts --mode fuzz",
+    "test:update-known": "vitest run test/conformance.test.ts --mode update-known"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@types/node": "^26.6.5",
+    "fast-check": "^4.10.2",
     "json5": "^2.2.3",
     "mitata": "^1.0.34",
     "publint": "^0.3.25",

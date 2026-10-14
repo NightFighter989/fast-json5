@@ -54,10 +54,10 @@ export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseO
 | --- | --- | --- |
 | `// …` and `/* … */` | spaces | yes |
 | Trailing `,` before `]` or `}` | space | yes |
-| Whitespace `\v \f   ﻿    ` and other Zs characters | space | yes (one UTF-16 unit each) |
-| Unquoted key `foo`, `ünï`, `ab` | `"foo"`; `\uXXXX` escapes pass through, since JSON decodes them | no (+2) |
+| Whitespace `\v \f \u00A0 \uFEFF \u2028 \u2029` and other Zs characters | space | yes (one UTF-16 unit each) |
+| Unquoted key `foo`, `ünï`, `\u0061b` | `"foo"`; `\uXXXX` escapes pass through, since JSON decodes them | no (+2) |
 | `'single'` | `"single"`: escape inner `"`, turn `\'` into `'` | mostly |
-| `\x41` | `A` | no |
+| `\x41` | `\u0041` | no |
 | `\v`, `\0` (not followed by a digit) | `\u000b`, `\u0000` | no |
 | Line continuation: `\` followed by LF, CR, CRLF, U+2028 or U+2029 | removed | no |
 | Identity escapes such as `\a` | `a` | no |
@@ -115,6 +115,22 @@ The fallback, if this turns out too clever: make the scanner a full validator an
 4. **Error-position tests** that check the line and column for errors after length-changing rewrites.
 5. **Type tests** (`expectTypeOf`) for the overloads.
 
+### Test bed as built (phase 1)
+
+| File | What it does |
+| --- | --- |
+| `test/conformance.test.ts` | Runs every case in `test/fixtures/json5-tests/` (vendored at upstream commit `ceb24d4`) and `test/fixtures/extra/`. Valid cases must produce exactly json5's value; invalid ones must throw a `SyntaxError`. Each case also checks that json5 itself agrees with the fixture's extension. |
+| `test/conformance.known-failures.json` | A ratchet. Listed cases run as `it.fails`, so a fixed case fails the suite until it's removed from the list. Regenerate with `npm run test:update-known`. |
+| `test/fuzz.test.ts` | Differential fuzzing against json5 on three generators: plain JSON, JSON5 documents, and corrupted documents (1-3 single-character edits). It also checks that the JSON5 generator only emits documents json5 accepts, and that each of 14 JSON5 features shows up in at least 1% of samples. `npm test` runs 300 cases per property; `npm run test:fuzz` runs 200k. |
+| `test/support/` | `oracle` (json5 with warnings muted), `equal` (`-0`, `NaN`, key order, own `__proto__`), `differential`, `errors` (`positionAt`, `¦` markers), `fixtures`, `arbitraries`. These have their own tests in `test/support.test.ts`. |
+
+Status against the stub: all 59 must-reject cases pass, because `JSON.parse` rejects them too. 61 valid-JSON5 cases are known failures. The JSON5 and corrupted-document fuzz properties are `it.fails` until phase 2.
+
+Things found while building it:
+- **Upstream fixture quirks:** `comments/irregular-block-comment.json` is valid JSON5 but not valid JSON, so `.json` files are checked against json5, not `JSON.parse`. The `new-lines/*-crlf.json5` files contain no CR bytes, so `test/fixtures/extra/new-lines/` adds real CR/CRLF cases. `strings/no-comma-array.errorSpec` is an orphan with a misspelled key. `test/fixtures/**` is marked `-text` in `.gitattributes`, so git never rewrites line endings in fixtures.
+- **json5 as an oracle:** it is spec-correct on escapes (`\01` rejected, `\0a` accepted, escaped key characters validated). It `console.warn`s on raw U+2028/U+2029 in strings, which the harness mutes.
+- **json5 error positions:** 1-based, only LF counts as a line break (CR and U+2028 don't), and columns count UTF-16 code units. `positionAt` copies these rules, so phase 4 can compare positions with json5 directly. See open questions.
+
 ## Benchmarks
 
 The `bench/` harness uses mitata. It already compares against `JSON.parse`, `json5` and `strip-json-comments`.
@@ -139,8 +155,8 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 | Phase | Deliverable | Done when |
 | --- | --- | --- |
 | **0. Scaffold** ✅ | package, build, test, bench harness | `npm run build && npm test` pass |
-| **1. Test bed** | json5-tests vendored, differential harness, error-position helpers | Suite runs (and mostly fails) against the stub |
-| **2. Scanner** | comments, trailing commas, whitespace, keys, strings, escapes, numbers | Conformance suite passes, except non-finite values |
+| **1. Test bed** ✅ | json5-tests vendored, differential harness, error-position helpers | Suite runs (and mostly fails) against the stub |
+| **2. Scanner** | comments, trailing commas, whitespace, keys, strings, escapes, numbers | Conformance suite passes, except non-finite values; the two fuzz `it.fails` become `it` |
 | **3. Non-finite values** | sentinel, post-walk, reviver wrapping, `nonFinite: 'reject'` | All of json5-tests passes; fuzzer clean for 1M cases |
 | **4. Errors** | strict validator on the error path, `lineNumber`/`columnNumber` | Error tests pass; messages are the same on every engine |
 | **5. Performance** | sticky-regex skipping, JSON.parse-first experiment, profiling | Targets in "Benchmarks" are met |
@@ -155,4 +171,5 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 - Minimum Node version: 18 is already end-of-life. Should we require 20?
 - Should `toJSON(text)` be exported in v0.1, or held back?
 - JSON.parse-first vs scan-first as the default: the benchmarks will decide.
+- Error line numbers: copy json5 (only LF starts a new line), or follow ECMAScript (CR, CRLF, U+2028 and U+2029 all do)? Copying json5 keeps it a true drop-in and makes differential testing of positions trivial. The ECMAScript rule is more correct for files with CR-only line endings.
 - Is it worth adding a `stringify` later? Out of scope for now.
