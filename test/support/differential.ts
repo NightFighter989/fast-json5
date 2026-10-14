@@ -1,5 +1,5 @@
 import JSON5 from 'json5'
-import { parse } from '../../src/index.js'
+import { JSON5SyntaxError, parse } from '../../src/index.js'
 import { diffValues } from './equal.js'
 import { attempt, fastParse, json5Parse, silenced, type Outcome } from './oracle.js'
 
@@ -17,9 +17,33 @@ export function expectSameAsJson5(text: string): void {
   } else if (actual.ok !== expected.ok) {
     if (actual.ok && !expected.ok && isNewerUnicodeIdentifier(text, expected.error)) return
     fail(text, actual.ok ? `accepted, but json5 threw: ${message(expected)}` : `threw ${message(actual)}, but json5 accepted`)
-  } else if (!actual.ok && !(actual.error instanceof SyntaxError)) {
-    fail(text, `threw a non-SyntaxError: ${message(actual)}`)
+  } else if (!actual.ok && !(actual.error instanceof JSON5SyntaxError)) {
+    fail(text, `threw something other than JSON5SyntaxError: ${message(actual)}`)
   }
+}
+
+/**
+ * When both parsers reject `text`, assert fast-json5 throws a JSON5SyntaxError at the same line
+ * and column as json5, except for three documented, intentional differences (see PLAN.md §7):
+ * - a line break as the offending character: json5 says (next line, column 0), we point at it;
+ * - an astral character: json5's column is one past its start (its second UTF-16 unit);
+ * - an unterminated block comment: json5 points at end of input, we point at the `/*`.
+ */
+export function expectSameErrorPosition(text: string): void {
+  const expected = json5Parse(text)
+  const actual = fastParse(text)
+  if (expected.ok || actual.ok) return
+  if (!(actual.error instanceof JSON5SyntaxError)) fail(text, `threw something other than JSON5SyntaxError: ${message(actual)}`)
+  const ours = actual.error
+  const theirs = expected.error as { lineNumber: number; columnNumber: number }
+  if (ours.lineNumber === theirs.lineNumber && ours.columnNumber === theirs.columnNumber) return
+
+  const char = text.codePointAt(ours.offset)
+  const lineBreakQuirk = char === 10 && theirs.lineNumber === ours.lineNumber + 1 && theirs.columnNumber === 0
+  const astralQuirk = char !== undefined && char > 0xffff && theirs.lineNumber === ours.lineNumber && theirs.columnNumber === ours.columnNumber + 1
+  const commentQuirk = ours.code === 'UNTERMINATED_COMMENT'
+  if (lineBreakQuirk || astralQuirk || commentQuirk || isNewerUnicodeIdentifier(text, expected.error)) return
+  fail(text, `error at ${ours.lineNumber}:${ours.columnNumber} (${ours.reason}), json5 at ${theirs.lineNumber}:${theirs.columnNumber}`)
 }
 
 /**
@@ -69,6 +93,9 @@ function isNewerUnicodeIdentifier(text: string, error: unknown): boolean {
   let offset = 0
   for (let line = 1; line < lineNumber; line++) offset = text.indexOf('\n', offset) + 1
   offset += columnNumber - 1
+  // json5's column for an astral character points at its second UTF-16 unit.
+  const unit = text.charCodeAt(offset)
+  if (unit >= 0xdc00 && unit <= 0xdfff && offset > 0) offset--
   const escaped = text.startsWith('\\u', offset) ? String.fromCharCode(parseInt(text.slice(offset + 2, offset + 6), 16)) : undefined
   const char = escaped ?? String.fromCodePoint(text.codePointAt(offset) ?? 0)
   return char.codePointAt(0)! > 127 && ID_CHAR.test(char)

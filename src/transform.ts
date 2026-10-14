@@ -58,8 +58,6 @@ const JSON5_NUMBER = /([+-]?)(?:0[xX]([0-9a-fA-F]+)|(Infinity)|(NaN)|(0|[1-9][0-
 const DOUBLE_QUOTED_RUN = /[^"\\\x00-\x1f]*/y
 const SINGLE_QUOTED_RUN = /[^'"\\\x00-\x1f]*/y
 const LINE_COMMENT_BODY = new RegExp(`[^\n\r${String.fromCharCode(LINE_SEPARATOR, PARAGRAPH_SEPARATOR)}]*`, 'y')
-const HEX2 = /[0-9a-fA-F]{2}/y
-const HEX4 = /[0-9a-fA-F]{4}/y
 const ASCII_IDENTIFIER_PART = /[A-Za-z0-9$_]*/y
 // ES5 IdentifierStart / IdentifierPart categories, as the JSON5 spec defines them.
 const UNICODE_ID_START = /[\p{Lu}\p{Ll}\p{Lt}\p{Lm}\p{Lo}\p{Nl}]/u
@@ -122,13 +120,14 @@ export class Scanner {
         } else if (c === -1 && stack.length === 0) {
           return this.finish()
         } else {
-          throw unexpected(src, at)
+          const expected = stack.length === 0 ? 'end of input' : stack[stack.length - 1] ? "',' or '}'" : "',' or ']'"
+          throw unexpected(src, at, expected)
         }
         continue
       }
 
       if (state === AFTER_KEY) {
-        if (c !== COLON) throw unexpected(src, at)
+        if (c !== COLON) throw unexpected(src, at, "':' after a key")
         this.pos = at + 1
         state = VALUE
         continue
@@ -143,7 +142,8 @@ export class Scanner {
 
       if (state === KEY) {
         if (c === DOUBLE_QUOTE || c === SINGLE_QUOTE) this.string(c)
-        else this.identifier()
+        else if (isAsciiIdentifierStart(c) || c === BACKSLASH || c > 127) this.identifier()
+        else throw unexpected(src, at, "a key or '}'")
         state = AFTER_KEY
         continue
       }
@@ -160,7 +160,8 @@ export class Scanner {
       } else {
         if (c === DOUBLE_QUOTE || c === SINGLE_QUOTE) this.string(c)
         else if ((c >= ZERO && c <= NINE) || c === MINUS || c === PLUS || c === DOT || c === 73 /* I */ || c === 78 /* N */) this.number()
-        else this.literal()
+        else if (c === 116 || c === 102 || c === 110) this.literal() // t f n
+        else throw unexpected(src, at, state === ELEMENT ? "a value or ']'" : 'a value')
         state = AFTER_VALUE
       }
     }
@@ -358,10 +359,10 @@ export class Scanner {
       end = LINE_COMMENT_BODY.lastIndex
     } else if (next === ASTERISK) {
       const close = src.indexOf('*/', start + 2)
-      if (close === -1) throw syntaxError(src, start, 'Unterminated block comment')
+      if (close === -1) throw syntaxError(src, start, 'UNTERMINATED_COMMENT', 'Unterminated block comment')
       end = close + 2
     } else {
-      throw unexpected(src, start)
+      throw unexpected(src, start + 1, "'/' or '*' after '/'")
     }
     this.edit(start, end, ' ')
     return end
@@ -397,7 +398,9 @@ export class Scanner {
         this.edit(i, i + 1, '\\"')
         i++
       } else if (c === LF || c === CR || c !== c) {
-        throw syntaxError(src, i, c === c ? 'Unescaped line break in string' : 'Unterminated string')
+        throw c === c
+          ? syntaxError(src, i, 'LINE_BREAK_IN_STRING', 'Unescaped line break in string')
+          : syntaxError(src, i, 'UNTERMINATED_STRING', 'Unterminated string')
       } else {
         // Other control characters are allowed raw in JSON5 but must be escaped in JSON.
         this.edit(i, i + 1, unicodeEscape(c))
@@ -421,8 +424,7 @@ export class Scanner {
       case 116: // t
         return i + 2
       case 117: // u
-        HEX4.lastIndex = i + 2
-        if (!HEX4.test(src)) throw syntaxError(src, i, 'Invalid Unicode escape')
+        this.expectHex(i + 2, 4)
         return i + 6
       case SINGLE_QUOTE:
         this.edit(i, i + 2, "'")
@@ -432,13 +434,12 @@ export class Scanner {
         return i + 2
       case ZERO: {
         const next = src.charCodeAt(i + 2)
-        if (next >= ZERO && next <= NINE) throw unexpected(src, i + 2)
+        if (next >= ZERO && next <= NINE) throw syntaxError(src, i + 2, 'INVALID_ESCAPE', 'Invalid escape: a digit cannot follow \\0')
         this.edit(i, i + 2, unicodeEscape(0))
         return i + 2
       }
       case 120: // x
-        HEX2.lastIndex = i + 2
-        if (!HEX2.test(src)) throw syntaxError(src, i, 'Invalid hexadecimal escape')
+        this.expectHex(i + 2, 2)
         this.edit(i, i + 4, unicodeEscape(parseInt(src.slice(i + 2, i + 4), 16)))
         return i + 4
       case LF:
@@ -453,8 +454,8 @@ export class Scanner {
         return end
       }
       default:
-        if (c !== c) throw syntaxError(src, i + 1, 'Unterminated string')
-        if (c >= 49 && c <= NINE) throw unexpected(src, i + 1) // \1 to \9
+        if (c !== c) throw syntaxError(src, i + 1, 'UNTERMINATED_STRING', 'Unterminated string')
+        if (c >= 49 && c <= NINE) throw syntaxError(src, i + 1, 'INVALID_ESCAPE', 'Invalid escape: octal escapes are not allowed')
         // Identity escape: `\a` means `a`.
         this.edit(i, i + 2, c < SPACE ? unicodeEscape(c) : src[i + 1] as string)
         return i + 2
@@ -492,9 +493,11 @@ export class Scanner {
   unicodeIdentifierChar(i: number, isStart: boolean): number {
     const src = this.src
     if (src.charCodeAt(i) === BACKSLASH) {
-      HEX4.lastIndex = i + 2
-      if (src.charCodeAt(i + 1) !== 117 || !HEX4.test(src)) throw syntaxError(src, i, 'Invalid escape in identifier')
-      if (!isIdentifierChar(parseInt(src.slice(i + 2, i + 6), 16), isStart)) throw syntaxError(src, i, 'Invalid identifier character')
+      if (src.charCodeAt(i + 1) !== 117) throw unexpected(src, i + 1, "'u' (only Unicode escapes are allowed in identifiers)")
+      this.expectHex(i + 2, 4)
+      if (!isIdentifierChar(parseInt(src.slice(i + 2, i + 6), 16), isStart)) {
+        throw syntaxError(src, i, 'INVALID_IDENTIFIER', 'Invalid identifier: the escaped character is not allowed in an identifier')
+      }
       return i + 6
     }
     const cp = src.codePointAt(i)
@@ -525,7 +528,9 @@ export class Scanner {
       const value = Number(`0x${hex}`)
       out = value === Infinity ? INFINITY_JSON : String(value)
     } else if (infinity !== undefined || nan !== undefined) {
-      if (this.rejectNonFinite) throw syntaxError(src, start, `${sign}${infinity ?? nan} is not allowed (nonFinite: 'reject')`)
+      if (this.rejectNonFinite) {
+        throw syntaxError(src, start, 'NON_FINITE_NOT_ALLOWED', `${sign}${infinity ?? nan} is not allowed (nonFinite: 'reject')`)
+      }
       if (nan !== undefined) {
         // The sign of NaN is meaningless, so -NaN and +NaN are plain NaN too.
         this.edit(start, start + text.length, NAN_SENTINEL_JSON)
@@ -535,19 +540,59 @@ export class Scanner {
       }
       out = INFINITY_JSON
     } else {
-      if (integer === undefined && (fraction === undefined || fraction.length === 1)) throw unexpected(src, start + (sign as string).length)
+      const body = start + (sign as string).length
+      if (integer === undefined && fraction === undefined) {
+        // Nothing numeric matched: point at the first character of Infinity/NaN that doesn't fit.
+        const c = src.charCodeAt(body)
+        const word = c === 73 ? 'Infinity' : c === 78 ? 'NaN' : ''
+        throw unexpected(src, body + mismatch(src, body, word), word ? `'${word}'` : 'a number')
+      }
+      if (integer === undefined && fraction === '.') throw unexpected(src, body + 1, 'a digit')
       out = `${integer ?? '0'}${fraction !== undefined && fraction.length > 1 ? fraction : ''}${exponent ?? ''}`
     }
     if (sign === '-') out = `-${out}`
-    if (out !== text) this.edit(start, start + text.length, out)
-    this.pos = start + text.length
+    const end = start + text.length
+    if (hex === undefined && infinity === undefined && exponent === undefined) this.checkNumberEnd(end, integer === '0' && fraction === undefined && exponent === undefined)
+    if (out !== text) this.edit(start, end, out)
+    this.pos = end
+  }
+
+  /**
+   * After a decimal number without an exponent, an `e` or (after a bare `0`) an `x` means a malformed exponent or hex prefix (`1e`, `1e+`, `0x`).
+   * Report it where the missing digit should be, as json5 does, rather than at the letter.
+   */
+  checkNumberEnd(end: number, isBareZero: boolean): void {
+    const src = this.src
+    const c = src.charCodeAt(end)
+    if (c === 101 || c === 69) {
+      const sign = src.charCodeAt(end + 1)
+      throw unexpected(src, end + (sign === PLUS || sign === MINUS ? 2 : 1), 'a digit in the exponent')
+    }
+    if ((c === 120 || c === 88) && isBareZero) {
+      throw unexpected(src, end + 1, 'a hexadecimal digit')
+    }
+  }
+
+  /** Require `count` hex digits at `i`, reporting the first character that isn't one. */
+  expectHex(i: number, count: number): void {
+    const src = this.src
+    for (let k = 0; k < count; k++) {
+      const c = src.charCodeAt(i + k)
+      if (!((c >= ZERO && c <= NINE) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70))) {
+        throw i + k >= src.length
+          ? syntaxError(src, i + k, 'UNTERMINATED_STRING', 'Unterminated string')
+          : syntaxError(src, i + k, 'INVALID_ESCAPE', 'Invalid escape: expected a hexadecimal digit')
+      }
+    }
   }
 
   literal(): void {
     const src = this.src
     const start = this.pos
-    const word = src.startsWith('true', start) ? 'true' : src.startsWith('false', start) ? 'false' : src.startsWith('null', start) ? 'null' : null
-    if (word === null) throw unexpected(src, start)
+    const c = src.charCodeAt(start)
+    const word = c === 116 ? 'true' : c === 102 ? 'false' : 'null'
+    const bad = mismatch(src, start, word)
+    if (bad < word.length) throw unexpected(src, start + bad, `'${word}'`)
     this.pos = start + word.length
   }
 }
@@ -581,4 +626,11 @@ function isJsonSpace(c: number): boolean {
 
 function isAsciiIdentifierPart(c: number): boolean {
   return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= ZERO && c <= NINE) || c === 36 || c === 95
+}
+
+/** Index within `word` of the first character of `src` (from `start`) that differs; `word.length` if none. */
+function mismatch(src: string, start: number, word: string): number {
+  let k = 0
+  while (k < word.length && src.charCodeAt(start + k) === word.charCodeAt(k)) k++
+  return k
 }

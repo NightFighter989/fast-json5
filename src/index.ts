@@ -1,6 +1,8 @@
 import { internalize, restoreNaN } from './nan.js'
 import { Scanner } from './transform.js'
 
+export { JSON5SyntaxError, type JSON5ErrorCode } from './errors.js'
+
 /** Same signature as the reviver accepted by `JSON.parse`. */
 export type Reviver = (this: any, key: string, value: any) => any
 
@@ -18,6 +20,9 @@ export interface ParseOptions {
 
 /**
  * Parse a JSON5 string. Drop-in compatible with `JSON5.parse(text, reviver)`.
+ *
+ * @throws {JSON5SyntaxError} for invalid JSON5, with `lineNumber`, `columnNumber`, `offset` and
+ *   `code` describing where and why. Errors thrown by a reviver propagate unchanged.
  */
 export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseOptions): T {
   const options: ParseOptions =

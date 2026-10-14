@@ -10,6 +10,8 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { expectSameAsJson5 } from './support/differential.js'
 import { loadFixtures, type FixtureCase } from './support/fixtures.js'
 import { fastParse, json5Parse } from './support/oracle.js'
+import { syntaxErrorOf } from './support/errors.js'
+import { parse } from '../src/index.js'
 
 const KNOWN_FAILURES = new URL('./conformance.known-failures.json', import.meta.url)
 const updating = process.env.FAST_JSON5_TEST_MODE === 'update-known'
@@ -40,6 +42,19 @@ describe('conformance', () => {
     } else {
       it(c.id, () => check(c))
     }
+  }
+
+  // Upstream's .errorSpec files give json5's error positions. `columnNumber: 0` is json5's
+  // line-break quirk (see PLAN.md §7), where fast-json5 deliberately points at the line break.
+  // A spec that json5 2.x itself no longer matches is stale and skipped (with a note).
+  for (const c of cases.filter((c) => c.errorSpec?.lineNumber && c.errorSpec.columnNumber)) {
+    const reference = json5Parse(c.text)
+    const { lineNumber, columnNumber } = (reference.ok ? {} : reference.error) as { lineNumber?: number; columnNumber?: number }
+    const stale = lineNumber !== c.errorSpec?.lineNumber || columnNumber !== c.errorSpec?.columnNumber
+    ;(stale ? it.skip : it)(`${c.id} reports the error where its .errorSpec says${stale ? ` (stale: json5 reports ${lineNumber}:${columnNumber})` : ''}`, () => {
+      const error = syntaxErrorOf(() => parse(c.text))
+      expect([error.lineNumber, error.columnNumber]).toEqual([c.errorSpec?.lineNumber, c.errorSpec?.columnNumber])
+    })
   }
 
   it('known-failures list only names existing cases', () => {

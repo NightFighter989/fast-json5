@@ -5,7 +5,7 @@
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
 import { json5Document, jsonDocument, mutatedDocument } from './support/arbitraries.js'
-import { expectSameAsJson5, expectSameReviverCalls } from './support/differential.js'
+import { expectSameAsJson5, expectSameErrorPosition, expectSameReviverCalls } from './support/differential.js'
 import { json5Parse } from './support/oracle.js'
 import { Scanner } from '../src/transform.js'
 
@@ -80,6 +80,10 @@ describe('differential vs json5', () => {
 
   it('agrees on corrupted documents (accepts and rejects the same inputs)', () => {
     fc.assert(fc.property(mutatedDocument, expectSameAsJson5), { numRuns })
+  })
+
+  it('reports errors at the same line and column as json5', () => {
+    fc.assert(fc.property(mutatedDocument, expectSameErrorPosition), { numRuns })
   })
 
   it('calls a reviver with the same keys, values and order as json5', () => {

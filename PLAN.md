@@ -34,7 +34,7 @@ export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseO
 
 - `parse(text, reviver)` matches `JSON5.parse`, so it's a drop-in replacement.
 - The return type is `any`, matching `JSON.parse` and `json5`. Callers can narrow it with the generic.
-- Errors are `SyntaxError` instances with `lineNumber` and `columnNumber` properties, the same fields `json5` uses. The message reports the position in the **original** source.
+- Errors are `JSON5SyntaxError` (exported), a `SyntaxError` subclass whose `name` is still `'SyntaxError'`. It has json5's `lineNumber` and `columnNumber` plus `offset`, a machine-readable `code` and `reason` (the message without the position). Positions always refer to the **original** source. See §7.
 - Possible later addition: `export function toJSON(text): string`, which exposes the transform itself. It costs almost nothing to add and is useful for piping into other JSON tools. We'll decide once the core is stable.
 
 ---
@@ -109,6 +109,22 @@ As built (phases 2 and 3):
 - The top level may be any value, with whitespace and comments around it. Empty input is an error.
 - `-0` stays `-0`. Big hex numbers lose precision the same way `Number('0x…')` does.
 
+### 7. Errors (phase 4)
+
+Every syntax error comes from the strict scanner (the fast path never reports errors itself; it hands over to the strict one), so there is one implementation of messages and positions.
+
+- **Shape:** `Unexpected character "x"; expected ',' or ']' at line 3, column 5` style. The `reason` says what each grammar state expected: `',' or ']'`, `':' after a key`, `a key or '}'`, `a value`, `end of input`, `'null'` and so on. Invisible characters (controls, spaces, BOM, ZWSP, lone surrogates) are shown as `U+XXXX`.
+- **Codes:** `UNEXPECTED_CHARACTER`, `UNEXPECTED_END`, `UNTERMINATED_STRING`, `UNTERMINATED_COMMENT`, `LINE_BREAK_IN_STRING`, `INVALID_ESCAPE`, `INVALID_IDENTIFIER`, `NON_FINITE_NOT_ALLOWED`. Prefer `code` over `instanceof` when ESM and CJS copies of the package might both be loaded (the dual-package hazard).
+- **Position rules (decided):** json5's. Lines are 1-based and only LF starts a new one; columns are 1-based UTF-16 code units. CRLF files count correctly; only CR-only files differ from ECMAScript line terminators. This keeps fast-json5 a drop-in and lets positions be tested against json5 directly.
+- **Where errors point**, matching json5: the first character of a literal that doesn't fit (`nu¦xl`), the first bad hex digit of an escape, the character after a stray `/`, and where the missing digit of an exponent or hex prefix should be (`1e¦`, `0x¦`).
+- **Intentional differences from json5**, all tolerated by the position fuzz property and nothing else:
+  1. If the offending character is a line break, json5 reports `(next line, column 0)`. We point at the line break itself (column 0 isn't valid in 1-based positions).
+  2. For an astral character (e.g. an emoji), json5's column is one past where it starts; we give its start.
+  3. For an unterminated `/*`, json5 points at end of input; we point at the `/*`.
+  4. Identifier characters newer than Unicode 10 (see §5).
+- **Measured agreement:** on corrupted documents both parsers reject, positions match json5 exactly in 92.6% of cases before counting the differences above, and in 100% once they're excluded. The fuzz property checks 200k documents. One upstream `.errorSpec` (`top-level-inline-comment`) is stale: json5 2.x itself reports `1:66` and so do we. The conformance suite skips it with a note.
+- **Reviver errors** propagate unchanged and are never mistaken for syntax errors, and a reviver is never run twice.
+
 ---
 
 ## Testing
@@ -175,7 +191,7 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 | **1. Test bed** ✅ | json5-tests vendored, differential harness, error-position helpers | Suite runs (and mostly fails) against the stub |
 | **2. Scanner** ✅ | comments, trailing commas, whitespace, keys, strings, escapes, numbers, Infinity | Conformance suite passes, except NaN; the two fuzz `it.fails` become `it` |
 | **3. NaN** ✅ | sentinel, post-walk, JS reviver on the NaN path, `nonFinite: 'reject'` (Infinity was done in phase 2) | All of json5-tests passes; fuzz NaN filter removed |
-| **4. Errors** | message wording, position rules (see open questions), exported error type | Error tests pass; messages are the same on every engine |
+| **4. Errors** ✅ | `JSON5SyntaxError` with codes, contextual messages, json5 position rules | Error tests pass; positions match json5 (§7); messages are the same on every engine |
 | **5. Performance** ✅ | fast path with `JSON_RUN` and local rules, strict fallback, rope output, regex alternative ordering | Targets in "Benchmarks" are met (see the table) |
 | **6. Release 0.1.0** | CI, README with table, provenance publish | `npm i fast-json5` works in ESM, CJS and TS projects |
 
@@ -188,5 +204,5 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 - Minimum Node version: 18 is already end-of-life. Should we require 20?
 - Should `toJSON(text)` be exported in v0.1, or held back?
 - ~~JSON.parse-first vs scan-first~~ Decided: the transform always runs (see §1).
-- Error line numbers: copy json5 (only LF starts a new line), or follow ECMAScript (CR, CRLF, U+2028 and U+2029 all do)? Copying json5 keeps it a true drop-in and makes differential testing of positions trivial. The ECMAScript rule is more correct for files with CR-only line endings.
+- ~~Error line numbers~~ Decided: json5's rules (§7).
 - Is it worth adding a `stringify` later? Out of scope for now.

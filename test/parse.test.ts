@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { parse } from '../src/index.js'
+import { JSON5SyntaxError, parse } from '../src/index.js'
 import { transform } from '../src/transform.js'
 import { expectSameAsJson5 } from './support/differential.js'
-import { syntaxErrorOf } from './support/errors.js'
+import { markedPosition, syntaxErrorOf } from './support/errors.js'
 
 // Exotic characters are built at runtime so this file stays ASCII.
 const ch = (...codes: number[]): string => String.fromCharCode(...codes)
@@ -313,8 +313,93 @@ describe('fast-path soundness', () => {
 })
 
 describe('errors', () => {
-  it('reports the position in the original source', () => {
-    const error = syntaxErrorOf(() => parse('{\n  a: 1,\n  b c\n}'))
-    expect([error.lineNumber, error.columnNumber]).toEqual([3, 5])
+  /** The thrown error, asserted to be a JSON5SyntaxError located at the `¦` marker. */
+  function errorAt(source: string): JSON5SyntaxError {
+    const { text, position } = markedPosition(source)
+    const error = syntaxErrorOf(() => parse(text))
+    expect(error).toBeInstanceOf(JSON5SyntaxError)
+    expect({ line: error.lineNumber, column: error.columnNumber }, JSON.stringify(text)).toEqual(position)
+    return error as JSON5SyntaxError
+  }
+
+  it('is a SyntaxError with json5-compatible fields', () => {
+    const error = errorAt('{\n  a: 1,\n  b ¦c\n}')
+    expect(error).toBeInstanceOf(SyntaxError)
+    expect(error.name).toBe('SyntaxError')
+    expect(error.offset).toBe(14)
+    expect(error.message).toBe(`${error.reason} at line 3, column 5`)
+  })
+
+  it('says what was expected', () => {
+    expect(errorAt('[1 ¦2]').reason).toBe(`Unexpected character "2"; expected ',' or ']'`)
+    expect(errorAt('{a: 1 ¦b: 2}').reason).toBe(`Unexpected character "b"; expected ',' or '}'`)
+    expect(errorAt('{a ¦1}').reason).toBe(`Unexpected character "1"; expected ':' after a key`)
+    expect(errorAt('{¦-a: 1}').reason).toBe(`Unexpected character "-"; expected a key or '}'`)
+    expect(errorAt('[¦}').reason).toBe(`Unexpected character "}"; expected a value or ']'`)
+    expect(errorAt('{a: ¦]}').reason).toBe(`Unexpected character "]"; expected a value`)
+    expect(errorAt('1 ¦2').reason).toBe(`Unexpected character "2"; expected end of input`)
+    expect(errorAt('{a: [1, 2¦').reason).toBe(`Unexpected end of input; expected ',' or ']'`)
+    expect(errorAt('¦').code).toBe('UNEXPECTED_END')
+  })
+
+  it('points at the first character of a literal that does not fit', () => {
+    expect(errorAt('nu¦xl').reason).toBe(`Unexpected character "x"; expected 'null'`)
+    expect(errorAt('[tr¦]').reason).toBe(`Unexpected character "]"; expected 'true'`)
+    expect(errorAt('-Inf¦').reason).toBe(`Unexpected end of input; expected 'Infinity'`)
+    expect(errorAt('Na¦n').code).toBe('UNEXPECTED_CHARACTER')
+  })
+
+  it('locates number errors where the missing digit should be', () => {
+    errorAt('1e¦')
+    errorAt('[1e+¦]')
+    errorAt('0x¦')
+    errorAt('[.¦e5]')
+    errorAt('[1e5¦e]')
+    errorAt('[0¦1]')
+  })
+
+  it('locates string and escape errors at the offending character', () => {
+    expect(errorAt('"ab¦').code).toBe('UNTERMINATED_STRING')
+    expect(errorAt('"a¦\nb"').code).toBe('LINE_BREAK_IN_STRING')
+    expect(errorAt('"\\u12¦g4"').code).toBe('INVALID_ESCAPE')
+    expect(errorAt('"\\x¦g0"').code).toBe('INVALID_ESCAPE')
+    expect(errorAt('"\\0¦1"').code).toBe('INVALID_ESCAPE')
+    expect(errorAt('"\\¦7"').code).toBe('INVALID_ESCAPE')
+    expect(errorAt('"\\u12¦').code).toBe('UNTERMINATED_STRING')
+  })
+
+  it('locates identifier and comment errors', () => {
+    expect(errorAt('{\\¦x61: 1}').reason).toMatch(/expected 'u'/)
+    expect(errorAt('{¦\\u0031: 1}').code).toBe('INVALID_IDENTIFIER')
+    expect(errorAt('[1 /¦ 2]').reason).toMatch(/expected '\/' or '\*' after '\/'/)
+    expect(errorAt('[1, ¦/* open').code).toBe('UNTERMINATED_COMMENT')
+  })
+
+  it('names invisible characters by code point', () => {
+    expect(errorAt(`[1${NBSP}¦${ch(0x200b)}]`).reason).toMatch(/U\+200B/)
+    expect(errorAt('[1 ¦\u0001]').reason).toMatch(/U\+0001/)
+  })
+
+  it('reports nonFinite rejections with their own code', () => {
+    const error = syntaxErrorOf(() => parse('[1, -Infinity]', { nonFinite: 'reject' })) as JSON5SyntaxError
+    expect([error.code, error.columnNumber]).toEqual(['NON_FINITE_NOT_ALLOWED', 5])
+  })
+
+  it('positions errors in the original text, not the rewritten JSON', () => {
+    // Everything before the error is rewritten (keys quoted, comments dropped, hex converted).
+    errorAt("{a: 'x', /* c */ b: 0x10, c: [1,], d¦}")
+    errorAt("{\n  // comment\n  key: 'value',\n  other: .5,\n  }¦}")
+  })
+
+  it('lets reviver errors through unchanged, calling the reviver once per value', () => {
+    const boom = new TypeError('boom')
+    let calls = 0
+    expect(() =>
+      parse('{a: 1}', () => {
+        calls++
+        throw boom
+      }),
+    ).toThrow(boom)
+    expect(calls).toBe(1)
   })
 })

@@ -45,10 +45,35 @@ parse<T = any>(text: string, options?: { reviver?, nonFinite?: 'allow' | 'reject
 
 `nonFinite: 'reject'` throws on `Infinity` and `NaN` literals, for when the result must be representable in JSON.
 
+### Errors
+
+Invalid input throws a `JSON5SyntaxError`. It's a `SyntaxError` (and its `name` is `'SyntaxError'`), so existing checks keep working:
+
+```ts
+import { parse, JSON5SyntaxError } from 'fast-json5'
+
+try {
+  parse('{\n  a: 1\n  b: 2\n}')
+} catch (error) {
+  if (error instanceof JSON5SyntaxError) {
+    error.message      // `Unexpected character "b"; expected ',' or '}' at line 3, column 3`
+    error.lineNumber   // 3
+    error.columnNumber // 3
+    error.offset       // 11, a 0-based index into the input
+    error.code         // 'UNEXPECTED_CHARACTER'
+  }
+}
+```
+
+Positions refer to your original text, never to the rewritten JSON, and use json5's rules: 1-based, only LF starts a new line, and columns count UTF-16 code units. `code` is one of `UNEXPECTED_CHARACTER`, `UNEXPECTED_END`, `UNTERMINATED_STRING`, `UNTERMINATED_COMMENT`, `LINE_BREAK_IN_STRING`, `INVALID_ESCAPE`, `INVALID_IDENTIFIER` or `NON_FINITE_NOT_ALLOWED`. Errors thrown by your reviver propagate unchanged.
+
 ## Differences from json5
 
 - **Unicode version of identifiers.** json5 classifies unquoted-key characters with Unicode 10 tables; fast-json5 uses your engine's current Unicode data. So keys containing letters added after Unicode 10 are accepted here.
-- **Error messages** are worded differently. Positions use the same rules: 1-based, only LF starts a new line, and columns count UTF-16 code units.
+- **Error messages** are worded differently and say what was expected. Positions match json5's, with three exceptions where fast-json5 is more precise:
+  - a line break as the offending character is reported on its own line, where json5 reports the next line at column 0;
+  - an astral character (such as an emoji) is reported at its first UTF-16 unit, where json5 reports its second;
+  - an unterminated `/*` is reported where it opens, where json5 reports end of input.
 
 ## License
 
