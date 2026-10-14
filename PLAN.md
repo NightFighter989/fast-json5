@@ -210,7 +210,7 @@ The `bench/` harness uses mitata. It already compares against `JSON.parse`, `jso
 | **3. NaN** ✅ | sentinel, post-walk, JS reviver on the NaN path, `nonFinite: 'reject'` (Infinity was done in phase 2) | All of json5-tests passes; fuzz NaN filter removed |
 | **4. Errors** ✅ | `JSON5SyntaxError` with codes, contextual messages, json5 position rules | Error tests pass; positions match json5 (§7); messages are the same on every engine |
 | **5. Performance** ✅ | fast path with `JSON_RUN` and local rules, strict fallback, rope output, regex alternative ordering | Targets in "Benchmarks" are met (see the table) |
-| **6. Release 0.1.0** 🟡 | CI, README with table, provenance publish | Ready: repository set (github.com/NightFighter989/fast-json5), CI trimmed, `release:check` passes. Waiting on the first CI run and the npm publish (see RELEASING.md) |
+| **6. Release 0.1.0** ✅ | CI, README with table, provenance publish | Published 2026-10-14 from the tagged release workflow, with a verified provenance attestation (`npm audit signatures`) |
 
 ## Dev notes
 
