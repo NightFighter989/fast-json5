@@ -1,4 +1,5 @@
 import { syntaxError, unexpected } from './errors.js'
+import { NAN_SENTINEL_JSON } from './nan.js'
 
 // Character codes. Non-ASCII characters are written as numbers so source files stay ASCII.
 const TAB = 9
@@ -62,16 +63,21 @@ export function transform(src: string): string {
   return new Scanner(src).run()
 }
 
-class Scanner {
+export class Scanner {
   readonly src: string
+  /** Throw on Infinity, -Infinity and NaN literals instead of converting them. */
+  readonly rejectNonFinite: boolean
+  /** Set once a NaN sentinel has been written; parse() then restores NaN after JSON.parse. */
+  nan = false
   pos = 0
   /** Start of the source not yet copied into `parts`. */
   last = 0
   /** Output so far, as source slices interleaved with replacements. Empty while nothing changed. */
   parts: string[] = []
 
-  constructor(src: string) {
+  constructor(src: string, rejectNonFinite = false) {
     this.src = src
+    this.rejectNonFinite = rejectNonFinite
   }
 
   run(): string {
@@ -361,11 +367,16 @@ class Scanner {
     if (hex !== undefined) {
       const value = Number(`0x${hex}`)
       out = value === Infinity ? INFINITY_JSON : String(value)
-    } else if (infinity !== undefined) {
+    } else if (infinity !== undefined || nan !== undefined) {
+      if (this.rejectNonFinite) throw syntaxError(src, start, `${sign}${infinity ?? nan} is not allowed (nonFinite: 'reject')`)
+      if (nan !== undefined) {
+        // The sign of NaN is meaningless, so -NaN and +NaN are plain NaN too.
+        this.edit(start, start + text.length, NAN_SENTINEL_JSON)
+        this.nan = true
+        this.pos = start + text.length
+        return
+      }
       out = INFINITY_JSON
-    } else if (nan !== undefined) {
-      // TODO(phase 3): emit a sentinel and restore NaN after JSON.parse.
-      throw syntaxError(src, start, 'NaN is not supported yet')
     } else {
       if (integer === undefined && (fraction === undefined || fraction.length === 1)) throw unexpected(src, start + (sign as string).length)
       out = `${integer ?? '0'}${fraction !== undefined && fraction.length > 1 ? fraction : ''}${exponent ?? ''}`

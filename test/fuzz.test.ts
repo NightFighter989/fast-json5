@@ -5,8 +5,8 @@
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
 import { json5Document, jsonDocument, mutatedDocument } from './support/arbitraries.js'
-import { expectSameAsJson5 } from './support/differential.js'
-import { fastParse, json5Parse } from './support/oracle.js'
+import { expectSameAsJson5, expectSameReviverCalls } from './support/differential.js'
+import { json5Parse } from './support/oracle.js'
 
 const numRuns = process.env.FAST_JSON5_TEST_MODE === 'fuzz' ? 200_000 : 300
 
@@ -56,35 +56,14 @@ describe('differential vs json5', () => {
   })
 
   it('agrees on JSON5 documents', () => {
-    fc.assert(fc.property(json5Document, checkUnlessNaN), { numRuns })
+    fc.assert(fc.property(json5Document, expectSameAsJson5), { numRuns })
   })
 
   it('agrees on corrupted documents (accepts and rejects the same inputs)', () => {
-    fc.assert(fc.property(mutatedDocument, checkUnlessNaN), { numRuns })
+    fc.assert(fc.property(mutatedDocument, expectSameAsJson5), { numRuns })
   })
-})
 
-// TODO(phase 3): drop this filter once NaN is supported. It keys off fast-json5's own NaN error
-// rather than json5's value, because a NaN can be overwritten by a duplicate key ({a: NaN, a: 1}).
-function checkUnlessNaN(text: string): void {
-  const outcome = fastParse(text)
-  fc.pre(outcome.ok || !String((outcome.error as Error).message).startsWith('NaN is not supported yet'))
-  expectSameAsJson5(text)
-}
-
-function containsNaN(value: unknown): boolean {
-  if (typeof value === 'number') return Number.isNaN(value)
-  if (typeof value !== 'object' || value === null) return false
-  return Object.values(value).some(containsNaN)
-}
-
-describe('differential vs json5 (sanity)', () => {
-  it('skips only a minority of documents for NaN', () => {
-    const sample = fc.sample(json5Document, { numRuns: 1000, seed: 7 })
-    const skipped = sample.filter((text) => {
-      const r = json5Parse(text)
-      return r.ok && containsNaN(r.value)
-    }).length
-    expect(skipped / sample.length).toBeLessThan(0.3)
+  it('calls a reviver with the same keys, values and order as json5', () => {
+    fc.assert(fc.property(json5Document, expectSameReviverCalls), { numRuns: Math.ceil(numRuns / 4) })
   })
 })

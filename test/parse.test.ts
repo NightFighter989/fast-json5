@@ -36,6 +36,37 @@ describe('parse', () => {
   it('accepts a reviver in the options object', () => {
     expect(parse('{a: 1}', { reviver: (k, v) => (k === 'a' ? 2 : v) })).toEqual({ a: 2 })
   })
+
+  it('shows the reviver real NaN values, never sentinels', () => {
+    const seen: unknown[] = []
+    const result = parse('{a: NaN, b: [NaN, 1]}', (key, value) => {
+      if (typeof value !== 'object') seen.push([key, value])
+      return typeof value === 'number' && Number.isNaN(value) ? 'was NaN' : value
+    })
+    expect(seen).toEqual([['a', NaN], ['0', NaN], ['1', 1]])
+    expect(result).toEqual({ a: 'was NaN', b: ['was NaN', 1] })
+  })
+
+  it('deletes properties when the reviver returns undefined on the NaN path', () => {
+    expect(parse('{a: NaN, b: 1, c: [NaN]}', (k, v) => (k === 'a' || k === '0' ? undefined : v))).toEqual({ b: 1, c: [undefined] })
+  })
+})
+
+describe('nonFinite option', () => {
+  it("rejects Infinity and NaN literals with 'reject'", () => {
+    for (const text of ['Infinity', '-Infinity', '+Infinity', 'NaN', '-NaN', '[1, NaN]', '{a: Infinity}']) {
+      const error = syntaxErrorOf(() => parse(text, { nonFinite: 'reject' }))
+      expect(error.message).toMatch(/not allowed/)
+    }
+  })
+
+  it("still allows them as keys and in strings, and overflowing numbers, with 'reject'", () => {
+    expect(parse("{Infinity: 'NaN', NaN: 1e400}", { nonFinite: 'reject' })).toEqual({ Infinity: 'NaN', NaN: Infinity })
+  })
+
+  it("allows them by default and with 'allow'", () => {
+    expect(parse('[Infinity, NaN]', { nonFinite: 'allow' })).toEqual([Infinity, NaN])
+  })
 })
 
 describe('fast path', () => {
@@ -204,7 +235,22 @@ describe('numbers', () => {
     expectParse('[1e400, -1e400, 1e-400]', [Infinity, -Infinity, 0])
   })
 
-  it.todo('returns NaN') // phase 3
+  it('returns NaN, with any sign', () => {
+    expectParse('[NaN, -NaN, +NaN, {a: NaN}]', [NaN, NaN, NaN, { a: NaN }])
+    expect(parse('NaN')).toBeNaN()
+  })
+
+  it('restores NaN under __proto__ keys and in deep nesting', () => {
+    const value = parse('{"__proto__": NaN}')
+    expect(Object.hasOwn(value, '__proto__') && Number.isNaN(value.__proto__)).toBe(true)
+    let deep: unknown = parse(`${'['.repeat(50_000)}NaN${']'.repeat(50_000)}`)
+    while (Array.isArray(deep)) deep = deep[0]
+    expect(deep).toBeNaN()
+  })
+
+  it('does not confuse a NaN-like string with NaN', () => {
+    expectParse(String.raw`["\u0000fast-json5:NaN:", 'NaN', NaN]`, [`${ch(0)}fast-json5:NaN:`, 'NaN', NaN])
+  })
 
   it('rejects invalid numbers', () => {
     const invalid = ['01', '-01', '00', '1.2.3', '+', '-', '.', '+.', '.e1', '1e', '1e+', '0x', '0xg', '- 1', '1 2', '0x1.5', '++1', 'Infinityx', 'Inf', '-NaNx', '1_000']

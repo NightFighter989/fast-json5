@@ -1,4 +1,5 @@
-import { transform } from './transform.js'
+import { internalize, restoreNaN } from './nan.js'
+import { Scanner } from './transform.js'
 
 /** Same signature as the reviver accepted by `JSON.parse`. */
 export type Reviver = (this: any, key: string, value: any) => any
@@ -7,9 +8,10 @@ export interface ParseOptions {
   /** Called for every parsed value, exactly like the `JSON.parse` reviver. */
   reviver?: Reviver
   /**
-   * How to handle `Infinity`, `-Infinity` and `NaN`, which JSON cannot represent.
+   * How to handle the `Infinity`, `-Infinity` and `NaN` literals, which JSON cannot represent.
    * - `'allow'` (default): return them as numbers, as JSON5 specifies.
-   * - `'reject'`: throw a `SyntaxError`, which keeps the fast path free of any fix-up work.
+   * - `'reject'`: throw a `SyntaxError` at the literal. Overflowing numbers such as `1e400`
+   *   are ordinary number literals and still parse to `Infinity`, as they do in `JSON.parse`.
    */
   nonFinite?: 'allow' | 'reject'
 }
@@ -20,7 +22,13 @@ export interface ParseOptions {
 export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseOptions): T {
   const options: ParseOptions =
     typeof reviverOrOptions === 'function' ? { reviver: reviverOrOptions } : (reviverOrOptions ?? {})
-  // transform() validates the whole document and throws positioned errors, so JSON.parse only ever
-  // sees valid JSON.
-  return JSON.parse(transform(String(text)), options.reviver)
+  // The scanner validates the whole document and throws positioned errors, so JSON.parse only
+  // ever sees valid JSON.
+  const scanner = new Scanner(String(text), options.nonFinite === 'reject')
+  const json = scanner.run()
+  if (!scanner.nan) return JSON.parse(json, options.reviver)
+
+  // NaN path: swap sentinels back first, so a reviver only ever sees real NaN values.
+  const value = restoreNaN(JSON.parse(json))
+  return (options.reviver ? internalize({ '': value }, '', options.reviver) : value) as T
 }

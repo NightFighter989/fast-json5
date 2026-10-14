@@ -16,10 +16,15 @@ export function attempt(fn: () => unknown): Outcome {
  * strings (valid JSON5, invalid ES5), which would flood fuzz output, so warnings are muted.
  */
 export function json5Parse(text: string): Outcome {
+  return silenced(() => attempt(() => JSON5.parse(text)))
+}
+
+/** Run `fn` with console.warn muted. */
+export function silenced<T>(fn: () => T): T {
   const warn = console.warn
   console.warn = () => {}
   try {
-    return attempt(() => JSON5.parse(text))
+    return fn()
   } finally {
     console.warn = warn
   }
