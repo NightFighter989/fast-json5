@@ -20,6 +20,7 @@ export interface ParseOptions {
 export function parse<T = any>(text: string, reviverOrOptions?: Reviver | ParseOptions): T {
   const options: ParseOptions =
     typeof reviverOrOptions === 'function' ? { reviver: reviverOrOptions } : (reviverOrOptions ?? {})
-  // TODO(phase 2): handle non-finite sentinels and map JSON.parse errors back to source positions.
+  // transform() validates the whole document and throws positioned errors, so JSON.parse only ever
+  // sees valid JSON.
   return JSON.parse(transform(String(text)), options.reviver)
 }
