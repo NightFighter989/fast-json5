@@ -1,0 +1,25 @@
+name: Fuzz
+
+# The long differential fuzz run (200k cases per property, ~1 minute locally). PRs get the short
+# run as part of `npm test`; this catches rarer counterexamples with fresh random seeds weekly.
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # On failure, fast-check prints the seed and a shrunk counterexample in this log.
+      - run: npm run test:fuzz

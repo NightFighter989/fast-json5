@@ -1,7 +1,7 @@
 {
   "name": "fast-json5",
-  "version": "0.0.0",
-  "description": "Fast JSON5 parser: rewrites JSON5 to JSON and lets the native JSON.parse build the values",
+  "version": "0.1.0",
+  "description": "Fast JSON5 parser: rewrites JSON5 to JSON with a native regex fast path, then lets JSON.parse build the values",
   "keywords": [
     "json5",
     "json",
@@ -9,8 +9,18 @@
     "parse",
     "parser",
     "config",
-    "fast"
+    "fast",
+    "performance",
+    "comments"
   ],
+  "homepage": "https://github.com/OWNER/fast-json5#readme",
+  "bugs": {
+    "url": "https://github.com/OWNER/fast-json5/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/fast-json5.git"
+  },
   "license": "MIT",
   "author": "Thomas Sedman",
   "type": "module",
@@ -45,9 +55,11 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
     "bench": "node bench/index.js",
     "lint:pkg": "publint && attw --pack .",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run lint:pkg",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run test:smoke && npm run lint:pkg",
     "test:fuzz": "vitest run test/fuzz.test.ts --mode fuzz",
-    "test:update-known": "vitest run test/conformance.test.ts --mode update-known"
+    "test:update-known": "vitest run test/conformance.test.ts --mode update-known",
+    "test:smoke": "node test/smoke/smoke.mjs && node test/smoke/smoke.cjs",
+    "release:check": "node scripts/release-check.mjs"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",

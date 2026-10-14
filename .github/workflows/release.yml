@@ -1,0 +1,30 @@
+name: Release
+
+# Publishes to npm when a version tag (e.g. v0.1.0) is pushed. See RELEASING.md.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # npm provenance and trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 ships npm 11, which supports trusted publishing (OIDC).
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - run: npm run release:check
+      # prepublishOnly also runs typecheck, tests, build and package lint.
+      - run: npm publish --provenance --access public
+        env:
+          # Only needed until trusted publishing is configured on npmjs.com; then leave it unset.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

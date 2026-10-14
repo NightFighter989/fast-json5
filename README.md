@@ -1,53 +1,95 @@
 # fast-json5
 
-> Work in progress. Not yet published.
+A fast, spec-complete [JSON5](https://json5.org) parser. It rewrites JSON5 into plain JSON, using a native regex for every stretch that's already JSON, and lets the engine's own `JSON.parse` build the values. That makes it **5–20× faster than [json5](https://www.npmjs.com/package/json5)**, and within about **1.25× of `JSON.parse`** on plain JSON.
 
-A JSON5 parser that doesn't build values in JavaScript. It scans JSON5 source, rewrites the JSON5-only syntax into plain JSON, and passes the result to the engine's native `JSON.parse`.
+- A drop-in replacement for `JSON5.parse(text, reviver)`
+- The whole JSON5 spec, checked against the official [json5-tests](https://github.com/json5/json5-tests) suite and fuzzed against json5
+- Precise `SyntaxError`s with line, column and an error code
+- No dependencies, ESM and CommonJS, TypeScript types included
+- Node 18+, Bun, Deno and browsers
+
+```sh
+npm install fast-json5
+```
+
+## Usage
 
 ```ts
 import { parse } from 'fast-json5'
 
-parse(`{
-  // comments
-  unquoted: 'single quotes',
-  hex: 0xFF,
-  trailing: [1, 2, 3,],
+const config = parse(`{
+  // Comments, unquoted keys and single quotes
+  name: 'my-app',
+  port: 0x1F90,
+  ratio: .75,
+  plugins: ['a', 'b',], // trailing commas
 }`)
+// { name: 'my-app', port: 8080, ratio: 0.75, plugins: ['a', 'b'] }
 ```
 
-It's a drop-in replacement for `JSON5.parse(text, reviver)` from [`json5`](https://www.npmjs.com/package/json5). It has no dependencies, ships ESM and CommonJS builds, and includes TypeScript types.
+CommonJS works the same way: `const { parse } = require('fast-json5')`. In TypeScript, `parse` returns `any` like `JSON.parse`, or the type you pass it: `parse<Config>(text)`.
+
+### Migrating from json5
+
+```diff
+- import JSON5 from 'json5'
+- const value = JSON5.parse(text, reviver)
++ import { parse } from 'fast-json5'
++ const value = parse(text, reviver)
+```
+
+fast-json5 only parses; keep json5 (or use `JSON.stringify`) if you also need `JSON5.stringify`.
 
 ## Benchmarks
 
-Node 22, `npm run bench` (mitata). Lower is better.
+Node 22, measured with [mitata](https://github.com/evanwashere/mitata). Run `npm run build && npm run bench` to reproduce. Times are per parse; lower is better.
 
 | Input | fast-json5 | `JSON.parse` | json5 | strip-json-comments + `JSON.parse` |
 | --- | --- | --- | --- | --- |
-| Pure JSON, 318 KiB | **1.50 ms** | 1.21 ms | 30.2 ms (20× slower) | 11.1 ms |
-| Minified JSON, 154 KiB | **1.23 ms** | 1.01 ms | 20.8 ms (17×) | 4.4 ms |
-| JSONC, 348 KiB | **1.89 ms** | — | 31.7 ms (17×) | 13.5 ms |
-| JSON5, 328 KiB | **4.53 ms** | — | 31.0 ms (6.9×) | — |
-| Small JSON config, 594 B | **3.3 µs** | 2.9 µs | 57 µs (17×) | 14.6 µs |
-| Small JSON5 config, 451 B | **8.8 µs** | — | 45 µs (5.2×) | — |
-
-On plain JSON it runs within about 1.25× of the native parser.
+| Pure JSON, 318 KiB | **1.5 ms** | 1.2 ms | 30 ms | 11 ms |
+| Minified JSON, 154 KiB | **1.2 ms** | 1.0 ms | 21 ms | 4.4 ms |
+| JSONC (comments, trailing commas), 348 KiB | **1.9 ms** | — | 32 ms | 14 ms |
+| Full JSON5, 328 KiB | **4.5 ms** | — | 31 ms | — |
+| Small JSON config, 594 B | **3.3 µs** | 2.9 µs | 57 µs | 15 µs |
+| Small JSON5 config, 451 B | **8.8 µs** | — | 45 µs | — |
 
 ## How it works
 
-A sticky regex consumes each run of plain-JSON tokens in one native call. JavaScript code only wakes up for JSON5 syntax: comments, trailing commas, unquoted keys, single quotes, JSON5 escapes, hex and dotted numbers, `Infinity` and `NaN`. It rewrites each such token into its JSON equivalent, and `JSON.parse` builds the values. Invalid input goes to a strict scanner, which throws a `SyntaxError` with `lineNumber` and `columnNumber` in your original text. See [PLAN.md](./PLAN.md) for the design.
+json5 builds every value in JavaScript. fast-json5 never builds values at all: it only rewrites text.
+
+1. A single sticky regex consumes each run of plain-JSON tokens in one native call. A whole pure-JSON document is one call, and its result is the original string, with no copy.
+2. JavaScript only wakes up at JSON5 syntax and rewrites that one token into its JSON equivalent:
+   - comments and JSON5 whitespace become spaces;
+   - trailing commas are dropped;
+   - `key:` becomes `"key":`, and `'str'` becomes `"str"`;
+   - JSON5 escapes become JSON escapes;
+   - `0xFF` becomes `255` and `.5` becomes `0.5`;
+   - `Infinity` becomes `1e400`, which `JSON.parse` overflows to `Infinity`;
+   - `NaN` becomes a random sentinel that's swapped back afterwards.
+3. `JSON.parse` builds the values and checks the structure.
+
+Each rewrite follows a local rule that can only leave invalid input invalid, and a differential fuzzer checks this against json5 on millions of valid and corrupted documents. Invalid input is re-read by a strict scanner, so error messages and positions refer to your text, not the rewritten JSON. [PLAN.md](./PLAN.md) has the full design.
 
 ## API
 
 ```ts
-parse<T = any>(text: string, reviver?: (key, value) => any): T
-parse<T = any>(text: string, options?: { reviver?, nonFinite?: 'allow' | 'reject' }): T
+function parse<T = any>(text: string, reviver?: Reviver): T
+function parse<T = any>(text: string, options?: ParseOptions): T
+
+type Reviver = (this: any, key: string, value: any) => any
+
+interface ParseOptions {
+  reviver?: Reviver
+  nonFinite?: 'allow' | 'reject'
+}
 ```
 
-`nonFinite: 'reject'` throws on `Infinity` and `NaN` literals, for when the result must be representable in JSON.
+- **`reviver`** works exactly as in `JSON.parse` and json5. It only ever sees real `NaN` values, never the internal sentinel.
+- **`nonFinite`**: `'allow'` (the default) returns `Infinity`, `-Infinity` and `NaN` as numbers, as JSON5 specifies. `'reject'` throws on those literals, for when the result must survive `JSON.stringify`. Overflowing numbers such as `1e400` still parse to `Infinity`, as they do in `JSON.parse`.
 
 ### Errors
 
-Invalid input throws a `JSON5SyntaxError`. It's a `SyntaxError` (and its `name` is `'SyntaxError'`), so existing checks keep working:
+Invalid input throws a `JSON5SyntaxError`. It's a `SyntaxError` (and its `name` is `'SyntaxError'`), so existing `catch` code keeps working:
 
 ```ts
 import { parse, JSON5SyntaxError } from 'fast-json5'
@@ -61,19 +103,46 @@ try {
     error.columnNumber // 3
     error.offset       // 11, a 0-based index into the input
     error.code         // 'UNEXPECTED_CHARACTER'
+    error.reason       // the message without the position
   }
 }
 ```
 
-Positions refer to your original text, never to the rewritten JSON, and use json5's rules: 1-based, only LF starts a new line, and columns count UTF-16 code units. `code` is one of `UNEXPECTED_CHARACTER`, `UNEXPECTED_END`, `UNTERMINATED_STRING`, `UNTERMINATED_COMMENT`, `LINE_BREAK_IN_STRING`, `INVALID_ESCAPE`, `INVALID_IDENTIFIER` or `NON_FINITE_NOT_ALLOWED`. Errors thrown by your reviver propagate unchanged.
+Positions use json5's rules: they're 1-based, only LF starts a new line, and columns count UTF-16 code units. They always refer to your original text.
+
+| `code` | Meaning |
+| --- | --- |
+| `UNEXPECTED_CHARACTER` | A character that can't appear here; the message says what was expected |
+| `UNEXPECTED_END` | The input ended early, including empty input |
+| `UNTERMINATED_STRING` | A string has no closing quote |
+| `UNTERMINATED_COMMENT` | A `/*` comment has no closing `*/` |
+| `LINE_BREAK_IN_STRING` | A raw line break inside a string (escape it, or end the line with `\` to continue) |
+| `INVALID_ESCAPE` | A bad escape such as `\x4`, `\u12g4`, `\01` or `\7` |
+| `INVALID_IDENTIFIER` | An unquoted key contains an escaped character that isn't allowed in identifiers |
+| `NON_FINITE_NOT_ALLOWED` | `Infinity` or `NaN` with `nonFinite: 'reject'` |
+
+Errors thrown by your reviver propagate unchanged. If your app can load both the ESM and CommonJS copies of the package, check `error.code` rather than `instanceof`, since each copy has its own class.
 
 ## Differences from json5
 
-- **Unicode version of identifiers.** json5 classifies unquoted-key characters with Unicode 10 tables; fast-json5 uses your engine's current Unicode data. So keys containing letters added after Unicode 10 are accepted here.
-- **Error messages** are worded differently and say what was expected. Positions match json5's, with three exceptions where fast-json5 is more precise:
-  - a line break as the offending character is reported on its own line, where json5 reports the next line at column 0;
+- **Newer Unicode in unquoted keys.** json5 classifies key characters with Unicode 10 tables; fast-json5 uses your engine's current Unicode data, as the spec intends. So keys with letters added since Unicode 10 are accepted.
+- **Error messages** are worded differently and say what was expected. Positions match json5's, except in three cases where fast-json5 is more precise:
+  - a raw line break that causes an error is reported on its own line, where json5 reports the next line at column 0;
   - an astral character (such as an emoji) is reported at its first UTF-16 unit, where json5 reports its second;
-  - an unterminated `/*` is reported where it opens, where json5 reports end of input.
+  - an unterminated `/*` is reported where it opens, where json5 reports the end of input.
+
+## Development
+
+| Command | What it does |
+| --- | --- |
+| `npm test` | Unit tests, the json5-tests conformance suite, and a short differential fuzz run |
+| `npm run test:fuzz` | The long fuzz run: 200k cases per property |
+| `npm run typecheck` | `tsc` over the source and tests, including the API type tests |
+| `npm run build` | ESM and CJS builds with declarations into `dist/` |
+| `npm run test:smoke` | Runtime checks against the built `dist/`, in both module formats |
+| `npm run bench` | The benchmark table above |
+
+The dev toolchain needs Node 22.18 or later; the published package runs on Node 18 and later. See [RELEASING.md](./RELEASING.md) for how releases are published.
 
 ## License
 
