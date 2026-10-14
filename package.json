@@ -1,0 +1,61 @@
+{
+  "name": "fast-json5",
+  "version": "0.0.0",
+  "description": "Fast JSON5 parser: rewrites JSON5 to JSON and lets the native JSON.parse build the values",
+  "keywords": [
+    "json5",
+    "json",
+    "jsonc",
+    "parse",
+    "parser",
+    "config",
+    "fast"
+  ],
+  "license": "MIT",
+  "author": "Thomas Sedman",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "bench": "node bench/index.js",
+    "lint:pkg": "publint && attw --pack .",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run lint:pkg"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@types/node": "^26.6.5",
+    "json5": "^2.2.3",
+    "mitata": "^1.0.34",
+    "publint": "^0.3.25",
+    "strip-json-comments": "^5.0.3",
+    "tsdown": "^0.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.4"
+  }
+}
